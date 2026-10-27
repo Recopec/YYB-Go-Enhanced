@@ -21,9 +21,18 @@ import (
 const ipzanHost = "service.ipzan.com"
 
 const (
-	juliangProfileScheme = "juliang"
-	juliangAPIEndpoint   = "http://v2.api.juliangip.com/company/dynamic/getips"
+	juliangProfileScheme   = "juliang"
+	juliangAPIEndpoint     = "http://v2.api.juliangip.com/company/dynamic/getips"
+	juliangPostpayEndpoint = "http://v2.api.juliangip.com/company/postpay/getips"
 )
+
+func juliangEndpointForTradeNo(tradeNo string) string {
+	clean := strings.TrimSpace(tradeNo)
+	if strings.HasPrefix(clean, "64") {
+		return juliangPostpayEndpoint
+	}
+	return juliangAPIEndpoint
+}
 
 var (
 	ipzanProvinceAreasEndpoint = "https://service.ipzan.com/area-get-province"
@@ -320,7 +329,7 @@ func juliangURLForRegion(profile *store.ProxyProviderProfile, province, city str
 		params["city"] = city
 	}
 	params["sign"] = juliangSign(params, profileQuery.Get("key"))
-	endpoint, _ := url.Parse(juliangAPIEndpoint)
+	endpoint, _ := url.Parse(juliangEndpointForTradeNo(params["trade_no"]))
 	query := endpoint.Query()
 	for key, value := range params {
 		query.Set(key, value)

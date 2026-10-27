@@ -266,6 +266,37 @@ func TestJuliangProfilesSignEachAccountRegion(t *testing.T) {
 		t.Fatalf("resolved juliang spec = %s", spec.APIURL)
 	}
 }
+func TestJuliangPostpayProfilesRouteToPostpayEndpoint(t *testing.T) {
+	t.Setenv("GIN_MODE", "test")
+	app, err := NewApp(Config{ResourceRoot: t.TempDir(), RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewApp() error = %v", err)
+	}
+	defer app.Close()
+
+	profile, err := app.db.CreateProxyProviderProfile(context.Background(), "巨量按量", "juliang", "http", "juliang://company/dynamic?trade_no=6483587531995538&key=0123456789abcdef0123456789abcdef&mode=whitelist")
+	if err != nil {
+		t.Fatalf("CreateProxyProviderProfile() error = %v", err)
+	}
+
+	spec, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
+		ProviderProfileID: &profile.ID,
+		RegionProvince: "云南省",
+		RegionCity:     "昆明市",
+	})
+	if err != nil {
+		t.Fatalf("proxySpecForSetting() error = %v", err)
+	}
+
+	u, err := url.Parse(spec.APIURL)
+	if err != nil {
+		t.Fatalf("parse spec.APIURL: %v", err)
+	}
+	if u.Path != "/company/postpay/getips" {
+		t.Fatalf("expected /company/postpay/getips, got %s", u.Path)
+	}
+}
+
 
 func TestStaticProxyProfileCanBeSelectedAndReused(t *testing.T) {
 	t.Setenv("GIN_MODE", "test")
