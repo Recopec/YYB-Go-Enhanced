@@ -603,7 +603,29 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	img, err := client.GetQRCodeImageForProduct(ctx, product)
+	var (
+		img   qr.ImageResult
+		probe proxyExitProbe
+	)
+	if resolvedProxy != "" {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			img, err = client.GetQRCodeImageForProduct(ctx, product)
+		}()
+		go func() {
+			defer wg.Done()
+			probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Second)
+			defer probeCancel()
+			if p, pErr := a.probeProxyExit(probeCtx, resolvedProxy); pErr == nil {
+				probe = p
+			}
+		}()
+		wg.Wait()
+	} else {
+		img, err = client.GetQRCodeImageForProduct(ctx, product)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -619,6 +641,12 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		keep[sid] = true
 	}
 	a.mu.Unlock()
+	exitDesc := ""
+	if probe.IP != "" {
+		exitDesc = fmt.Sprintf(" 出口=%s%s(%s)", probe.Region, probe.City, probe.IP)
+	}
+	log.Printf("[qr] 二维码已拉取: session=%s wx_uuid=%s proxy=%s%s 生成时间=%s",
+		img.Session.ID, img.Session.WXUUID, proxysource.Mask(resolvedProxy), exitDesc, time.Now().Format("2006-01-02 15:04:05"))
 	path := a.resources.qrPath(img.Session.ID)
 	// The in-memory copy above is authoritative. The file is only a cache for
 	// deployments that serve the image endpoint after a process restart.
@@ -634,6 +662,12 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		"status":     img.Session.Status,
 		"image_url":  basePath + "/" + img.Session.ID + "/image",
 		"proxy":      proxysource.Mask(resolvedProxy),
+	}
+	if probe.IP != "" {
+		out["exit_ip"] = probe.IP
+		out["exit_country"] = probe.Country
+		out["exit_region"] = probe.Region
+		out["exit_city"] = probe.City
 	}
 	if r.URL.Query().Get("as_base64") == "true" {
 		out["image_base64"] = qr.DataURIJPEG(img.ImageBytes)
@@ -683,12 +717,26 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "qr session not found")
 			return
 		}
+		if login.Session != nil && login.Session.Age() > a.cfg.QRSessionTTL {
+			log.Printf("[qr] ❌ 二维码已达 %s 有效期上限自动失效: session=%s wx_uuid=%s 存活时长=%s",
+				a.cfg.QRSessionTTL.Round(time.Second), sessionID, login.Session.WXUUID, login.Session.Age().Round(time.Second))
+			a.dropQRSession(sessionID)
+			writeJSON(w, http.StatusOK, qr.PollResult{
+				Status:  "expired",
+				Message: "二维码已超过有效期",
+			})
+			return
+		}
 		result, err := login.Client.PollQRCode(r.Context(), login.Session)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		if terminalQR(result.Status) {
+			if result.Status == "expired" {
+				log.Printf("[qr] ❌ 微信反馈二维码已过期: session=%s wx_uuid=%s 过期时刻=%s 实际存活=%s",
+					sessionID, login.Session.WXUUID, time.Now().Format("2006-01-02 15:04:05"), login.Session.Age().Round(time.Second))
+			}
 			a.dropQRSession(sessionID)
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -866,7 +914,17 @@ func (a *App) handleAccountRefresh(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	status, refreshErr := a.refreshLiveness(r.Context(), acc)
+	var status string
+	var refreshErr error
+	if body.Force {
+		status, _, refreshErr = a.refreshAccount(r.Context(), acc, true)
+		status = a.finishLivenessRefresh(r.Context(), acc, status)
+	} else {
+		status, refreshErr = a.refreshLiveness(r.Context(), acc)
+	}
+	if fresh, err := a.db.GetAccount(r.Context(), acc.ID); err == nil && fresh != nil {
+		acc = fresh
+	}
 	writeJSON(w, http.StatusOK, refreshOut(acc, status, refreshErr))
 }
 
@@ -1169,7 +1227,8 @@ func acceptWXAppRoute(w http.ResponseWriter, r *http.Request, path string) bool 
 }
 
 type accountRefIn struct {
-	Ref string `json:"ref"`
+	Ref   string `json:"ref"`
+	Force bool   `json:"force"`
 }
 
 type wxappRequest struct {
@@ -1605,7 +1664,8 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	if ctx.Err() != nil || (!bufferRejected && (errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) || errors.As(callErr, &networkErr) || errors.Is(callErr, io.EOF) || errors.Is(callErr, io.ErrUnexpectedEOF))) {
 		// A failed transport does not establish that saved credentials expired.
 		// Preserve the session and original diagnostic; do not repeat a slow call.
-		return nil, callErr
+		// Name a filtered proxy exit so the operator fixes the right layer.
+		return nil, protocol.ExplainLongLinkFailure(callErr, proxyValue)
 	}
 	if bufferRejected && !ticketAccessRejected {
 		// ManualAuth rejected the saved buffer before sending the operation.
@@ -1773,9 +1833,18 @@ func (a *App) invokeOperateWXData(ctx context.Context, acc *store.WechatAccount,
 }
 
 func refreshOut(acc *store.WechatAccount, status string, refreshErr error) map[string]any {
+	public := acc.Public()
 	out := map[string]any{
-		"id": acc.ID, "openid": acc.OpenID, "uin": acc.UIN, "nickname": acc.Nickname,
-		"status": status, "rescan_required": status == "expired" || status == store.StatusSessionOnly,
+		"id":                    acc.ID,
+		"openid":                acc.OpenID,
+		"uin":                   acc.UIN,
+		"nickname":              acc.Nickname,
+		"status":                status,
+		"rescan_required":       status == "expired" || status == store.StatusSessionOnly,
+		"rescan_recommended":    public.RescanRecommended,
+		"credential_expires_at": public.CredentialExpiresAt,
+		"credential_expires_in": public.CredentialExpiresIn,
+		"last_checked_at":       acc.LastCheckedAt,
 	}
 	if refreshErr != nil {
 		out["refresh_error"] = refreshErr.Error()

@@ -1,6 +1,6 @@
 # 代理与账号保活
 
-YYB Go Enhanced 的代理按微信账号独立保存。默认扫码、OAuth 回调、凭据刷新、用户资料、`wx.login`、LongLink 和 ShortLink 均遵循该账号的代理策略；v0.2.29 起可单独指定小程序调用直连。
+YYB Go Enhanced 的代理按微信账号独立保存。扫码、OAuth 回调、凭据刷新、用户资料、`wx.login`、LongLink 和 ShortLink 均遵循该账号的代理策略；小程序调用出口默认跟随账号连接模式，可单独改为直连。
 
 ## 账号代理与脚本代理的区别
 
@@ -37,7 +37,7 @@ host:port|user|pass
 
 ## 保活走代理，小程序调用直连
 
-在「代理设置」选择账号，保留原来的静态代理或配置库，再把「小程序调用出口」设为「直连」并保存即可。
+在「代理设置」选择账号，保留原来的静态代理或配置库。「小程序调用出口」默认「跟随账号连接模式」，取码与保活使用同一出口；出口无法承载 LongLink 或需要与账号分开时，改为「直连」并保存。
 
 | 请求 | 跟随账号连接模式（默认） | 小程序调用直连 |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ host:port|user|pass
 
 此设置是主动分流，不是代理故障后的自动回退。直连调用不会额外提取动态代理；如果需要刷新凭据且原账号代理仍不可达，请求仍会失败，不会改走直连刷新。短效动态代理仍不参与后台保活。两种出口也不保证账号更稳定，请按实际网络验证。
 
-`GET /accounts/proxy?ref=账号标识` 返回 `protocol_proxy_mode`；`PUT /accounts/proxy` 在原有代理配置中可传 `"protocol_proxy_mode":"direct"` 或 `"account"`。未传该字段时保留原值，新账号及旧库默认 `account`。重扫、配置复制和 ID 整理保留此设置。「测试代理」只检测所配置代理，不代表小程序直连链路已验证。
+`GET /accounts/proxy?ref=账号标识` 返回 `protocol_proxy_mode`；`PUT /accounts/proxy` 在原有代理配置中可传 `"protocol_proxy_mode":"direct"` 或 `"account"`。未传该字段时保留原值，新账号及没有保存策略的账号默认 `account`；已显式保存的 `direct` 保持原值，不随升级自动改写。重扫、配置复制和 ID 整理保留此设置。「测试代理」只检测所配置代理，不代表协议调用链路已验证。
 
 ## 动态代理 API
 
@@ -74,7 +74,9 @@ host:port|user|pass
 
 ## 巨量
 
-配置库保存企业动态代理的业务编号和 API Key。系统按账号省市生成签名，并读取 `json2` 返回的临时 `http_user`、`http_pass`。也可使用自动白名单模式。
+配置库保存企业动态代理的业务编号和 API Key。系统按账号省市生成签名。
+
+巨量只提供 IP 白名单鉴权，没有账号密码模式：每次提取固定附加 `auto_white=1`，由巨量把本机当前公网出口实时加入白名单，无需手动维护，也不会返回 `http_user`/`http_pass`。旧版本保存的 `mode=auth` 配置会在读取时自动归一到白名单，新提交 `authorization_mode=auth` 会在保存阶段被拒绝。
 
 供应商提取入口可能只支持 HTTP。是否启用应结合本机网络、反向代理和安全要求判断，不要把含签名的提取 URL 写入公开日志。
 
@@ -202,3 +204,27 @@ v0.2.26 进一步修复代理握手**之后**的处理：LongLink、ShortLink �
 - 不要把代理数据库、提取 URL、白名单密钥或账号密码提交到 GitHub。
 - 代理测试应同时验证提取成功、隧道连通和出口地区。
 - 需要稳定保活时优先使用直连或长期固定出口，不要依赖一分钟短效代理。
+
+### 出口按 MMTLS 记录版本过滤（2026-10）
+
+现象：代理提取成功、出口地区正确、普通 HTTPS（如百度）经同一代理正常，但所有 `wx.login` / 小程序调用都报
+`all LongLink candidates failed: ... LongLink handshake to <IP>:443 failed: EOF`，且每个候选都在数百毫秒内 EOF。
+
+实测结论（同一台机器，直连可完成 MMTLS 握手，约 60ms）：
+
+- 微信 LongLink 使用 MMTLS，其 TLS 记录版本是 `0xf103`，不是真实 TLS 的 `0x03xx`。
+- 把同一条 ClientHello 的版本字段改成 `0x0303` 后再经代理发送，隧道保持连通；保留 `0xf103` 则在 25–45ms 内被重置。
+- 发往普通 HTTP 端口（80）也同样被重置，说明目标服务器无关，是出口链路按记录版本做的过滤。
+- 巨量的 HTTP CONNECT 与 SOCKS5 出口都复现，多个省份、多个节点均如此。
+
+处理方式：
+
+- `测试代理` 现在会额外执行一次真实 LongLink 探测并返回 `longlink_ok` / `longlink_stage`：
+  `dial` 为代理连接或认证失败；`filtered` 为出口按 MMTLS 记录版本过滤；`handshake` 为其他握手失败。
+- 出口被过滤时无法用客户端改动绕过（服务端只接受 `0xf103`），应更换不做该过滤的出口，或把该账号的
+  「小程序调用出口」设为「直连」——扫码与保活仍走账号代理，只有协议调用直连。
+
+为什么扫码登录和保活不受影响：它们走的是 HTTPS 短链（`open.weixin.qq.com`、`long.open.weixin.qq.com`、
+`yybadaccess.3g.qq.com`），记录版本是标准 TLS 的 `0x0303`/TLS1.3，出口正常放行（实测经同一巨量出口
+完整 TLS 握手 0.4–0.6 秒）。LongLink/MMTLS 只在 `getCode`、`getPhoneNumber`、`operateWXData` 这些
+小程序协议调用里使用，因此会出现「代理可用、扫码能上、保活正常，但所有调用失败」的组合。

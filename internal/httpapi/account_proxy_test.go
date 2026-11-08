@@ -225,7 +225,7 @@ func TestJuliangProfilesSignEachAccountRegion(t *testing.T) {
 	handler := app.Handler()
 	created := apiRequest(t, handler, http.MethodPost, "/api/proxy-profiles", map[string]any{
 		"name": "巨量代理 1", "provider": "juliang", "proxy_type": "http",
-		"authorization_mode": "auth",
+		"authorization_mode": "whitelist",
 		"trade_no":           "1234567890123456",
 		"api_key":            "0123456789abcdef0123456789abcdef",
 	})
@@ -262,7 +262,7 @@ func TestJuliangProfilesSignEachAccountRegion(t *testing.T) {
 		t.Fatalf("parse juliang extraction URL: %v", err)
 	}
 	query := u.Query()
-	if u.Scheme != "http" || u.Host != "v2.api.juliangip.com" || query.Get("province") != "山东" || query.Get("city") != "潍坊" || query.Get("area") != "" || query.Get("auth_type") != "2" || query.Get("result_type") != "json2" || len(query.Get("sign")) != 32 {
+	if u.Scheme != "http" || u.Host != "v2.api.juliangip.com" || query.Get("province") != "山东" || query.Get("city") != "潍坊" || query.Get("area") != "" || query.Get("auto_white") != "1" || query.Get("auth_type") != "" || query.Get("result_type") != "json2" || len(query.Get("sign")) != 32 {
 		t.Fatalf("resolved juliang spec = %s", spec.APIURL)
 	}
 }
@@ -281,8 +281,8 @@ func TestJuliangPostpayProfilesRouteToPostpayEndpoint(t *testing.T) {
 
 	spec, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
 		ProviderProfileID: &profile.ID,
-		RegionProvince: "云南省",
-		RegionCity:     "昆明市",
+		RegionProvince:    "云南省",
+		RegionCity:        "昆明市",
 	})
 	if err != nil {
 		t.Fatalf("proxySpecForSetting() error = %v", err)
@@ -295,8 +295,173 @@ func TestJuliangPostpayProfilesRouteToPostpayEndpoint(t *testing.T) {
 	if u.Path != "/company/postpay/getips" {
 		t.Fatalf("expected /company/postpay/getips, got %s", u.Path)
 	}
-}
+	spec62, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
+		ProviderProfileID: &profile.ID,
+		RegionProvince:    "云南省",
+		RegionCity:        "曲靖市",
+	})
+	if err != nil {
+		t.Fatalf("proxySpecForSetting() error = %v", err)
+	}
+	u62, _ := url.Parse(spec62.APIURL)
+	if u62.Path != "/company/postpay/getips" {
+		t.Fatalf("expected /company/postpay/getips, got %s", u62.Path)
+	}
 
+	// Test alphanumeric key validation
+	profile62, err := app.db.CreateProxyProviderProfile(context.Background(), "巨量62", "juliang", "http", "juliang://company/dynamic?trade_no=6278393975360688&key=6l882ej0ma0q3asabzy3jkv5axwkb8yf&mode=whitelist")
+	if err != nil {
+		t.Fatalf("CreateProxyProviderProfile() error = %v", err)
+	}
+	specAlpha, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
+		ProviderProfileID: &profile62.ID,
+		RegionProvince:    "云南省",
+		RegionCity:        "曲靖市",
+	})
+	if err != nil {
+		t.Fatalf("proxySpecForSetting() alpha key error = %v", err)
+	}
+	uAlpha, _ := url.Parse(specAlpha.APIURL)
+	if len(uAlpha.Query().Get("sign")) != 32 {
+		t.Fatalf("expected 32-char sign, got %s", uAlpha.Query().Get("sign"))
+	}
+	if uAlpha.Path != "/company/postpay/getips" {
+		t.Fatalf("expected /company/postpay/getips for 62-trade, got %s", uAlpha.Path)
+	}
+
+	// Test autonomous prefecture normalization (e.g. 大理白族自治州 -> 大理)
+	specDali, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
+		ProviderProfileID: &profile62.ID,
+		RegionProvince:    "云南省",
+		RegionCity:        "大理白族自治州",
+	})
+	if err != nil {
+		t.Fatalf("proxySpecForSetting() dali error = %v", err)
+	}
+	uDali, _ := url.Parse(specDali.APIURL)
+	if uDali.Query().Get("city") != "大理" {
+		t.Fatalf("expected city=大理, got %s", uDali.Query().Get("city"))
+	}
+	if uDali.Query().Get("province") != "云南" {
+		t.Fatalf("expected province=云南, got %s", uDali.Query().Get("province"))
+	}
+}
+func TestJuliangProfileExtractsFromPastedURLAndDefaultsToWhitelist(t *testing.T) {
+	t.Setenv("GIN_MODE", "test")
+	app, err := NewApp(Config{ResourceRoot: t.TempDir(), RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewApp() error = %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Handler()
+	pastedURL := "http://v2.api.juliangip.com/postpay/getips?auto_white=1&num=1&pt=1&result_type=json2&trade_no=6483587531995538&sign=4a2a59427526d3b7bbbd3d2858569171"
+	created := apiRequest(t, handler, http.MethodPost, "/api/proxy-profiles", map[string]any{
+		"name":       "巨量链接自动解析",
+		"provider":   "juliang",
+		"proxy_type": "http",
+		"trade_no":   pastedURL,
+		"api_key":    "0123456789abcdef0123456789abcdef",
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("POST juliang profile status = %d body=%s", created.Code, created.Body.String())
+	}
+	var profileResponse struct {
+		Data store.ProxyProviderProfile `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &profileResponse); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	u, err := url.Parse(profileResponse.Data.APIURL)
+	if err != nil {
+		t.Fatalf("parse profile APIURL: %v", err)
+	}
+	if u.Query().Get("trade_no") != "6483587531995538" {
+		t.Fatalf("expected trade_no=6483587531995538, got %s", u.Query().Get("trade_no"))
+	}
+	if u.Query().Get("mode") != "whitelist" {
+		t.Fatalf("expected mode=whitelist by default, got %s", u.Query().Get("mode"))
+	}
+	if u.Query().Get("endpoint") != "http://v2.api.juliangip.com/postpay/getips" {
+		t.Fatalf("expected endpoint http://v2.api.juliangip.com/postpay/getips, got %s", u.Query().Get("endpoint"))
+	}
+}
+func TestPinzanAndJuliangDualProviderIsolation(t *testing.T) {
+	t.Setenv("GIN_MODE", "test")
+	app, err := NewApp(Config{ResourceRoot: t.TempDir(), RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewApp() error = %v", err)
+	}
+	defer app.Close()
+
+	// 1. Create Pinzan Profile
+	pinzanProfile, err := app.db.CreateProxyProviderProfile(context.Background(), "品赞测试", "ipzan", "http", "https://service.ipzan.com/core-extract?no=20261028001&secret=pinzanpass123&mode=auth&format=json")
+	if err != nil {
+		t.Fatalf("Create Pinzan profile: %v", err)
+	}
+
+	// 2. Create Juliang Profile
+	juliangProfile, err := app.db.CreateProxyProviderProfile(context.Background(), "巨量测试", "juliang", "http", "juliang://company/dynamic?trade_no=6278393975360688&key=6l882ej0ma0q3asabzy3jkv5axwkb8yf&mode=whitelist")
+	if err != nil {
+		t.Fatalf("Create Juliang profile: %v", err)
+	}
+
+	// 3. Bind account to Pinzan with Qujing (code: 530300, name: 曲靖市, province: 云南省)
+	pinzanSpec, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
+		ProviderProfileID: &pinzanProfile.ID,
+		RegionCode:        "530300",
+		RegionProvince:    "云南省",
+		RegionCity:        "曲靖市",
+	})
+	if err != nil {
+		t.Fatalf("resolve pinzan spec: %v", err)
+	}
+	uPinzan, err := url.Parse(pinzanSpec.APIURL)
+	if err != nil {
+		t.Fatalf("parse pinzan URL: %v", err)
+	}
+	// Verify Pinzan URL has 6-digit area code 530300, no province or city Chinese params
+	if uPinzan.Host != "service.ipzan.com" {
+		t.Fatalf("expected service.ipzan.com, got %s", uPinzan.Host)
+	}
+	if uPinzan.Query().Get("area") != "530300" {
+		t.Fatalf("expected Pinzan area=530300, got %s", uPinzan.Query().Get("area"))
+	}
+	if uPinzan.Query().Get("city") != "" || uPinzan.Query().Get("province") != "" {
+		t.Fatalf("Pinzan URL should not contain city or province params: %s", pinzanSpec.APIURL)
+	}
+
+	// 4. Bind account to Juliang with the EXACT same input data (code: 530300, name: 曲靖市, province: 云南省)
+	juliangSpec, err := app.proxySpecForSetting(context.Background(), &store.AccountProxySetting{
+		ProviderProfileID: &juliangProfile.ID,
+		RegionCode:        "530300",
+		RegionProvince:    "云南省",
+		RegionCity:        "曲靖市",
+	})
+	if err != nil {
+		t.Fatalf("resolve juliang spec: %v", err)
+	}
+	uJuliang, err := url.Parse(juliangSpec.APIURL)
+	if err != nil {
+		t.Fatalf("parse juliang URL: %v", err)
+	}
+	// Verify Juliang URL has Chinese city=曲靖 and province=云南, valid sign, no area code param
+	if uJuliang.Host != "v2.api.juliangip.com" {
+		t.Fatalf("expected v2.api.juliangip.com, got %s", uJuliang.Host)
+	}
+	if uJuliang.Query().Get("city") != "曲靖" {
+		t.Fatalf("expected Juliang city=曲靖, got %s", uJuliang.Query().Get("city"))
+	}
+	if uJuliang.Query().Get("province") != "云南" {
+		t.Fatalf("expected Juliang province=云南, got %s", uJuliang.Query().Get("province"))
+	}
+	if uJuliang.Query().Get("area") != "" {
+		t.Fatalf("Juliang URL must not contain area param: %s", juliangSpec.APIURL)
+	}
+	if len(uJuliang.Query().Get("sign")) != 32 {
+		t.Fatalf("expected 32-char sign in Juliang URL, got %s", uJuliang.Query().Get("sign"))
+	}
+}
 
 func TestStaticProxyProfileCanBeSelectedAndReused(t *testing.T) {
 	t.Setenv("GIN_MODE", "test")
@@ -512,5 +677,37 @@ func TestExpiredAccountRejectsBeforeResolvingProxy(t *testing.T) {
 	var expired accountExpiredError
 	if !errors.As(err, &expired) || proxyCalls != 0 || callCount != 0 {
 		t.Fatalf("invokeWXApp() err=%v proxyCalls=%d callCount=%d", err, proxyCalls, callCount)
+	}
+}
+
+func TestParseIPIPOutput(t *testing.T) {
+	// Standard text response
+	textSample := "当前 IP：120.231.188.108  来自于：中国 广东 江门  移动\n"
+	probe, err := parseIPIPOutput(textSample)
+	if err != nil {
+		t.Fatalf("parseIPIPOutput(text) error = %v", err)
+	}
+	if probe.IP != "120.231.188.108" || probe.Country != "中国" || probe.Region != "广东" || probe.City != "江门" {
+		t.Fatalf("unexpected probe result: %+v", probe)
+	}
+
+	// Municipality text response
+	muniSample := "当前 IP：111.198.12.34  来自于：中国 北京  联通"
+	probeMuni, err := parseIPIPOutput(muniSample)
+	if err != nil {
+		t.Fatalf("parseIPIPOutput(muni) error = %v", err)
+	}
+	if probeMuni.IP != "111.198.12.34" || probeMuni.Region != "北京" || probeMuni.City != "北京" {
+		t.Fatalf("unexpected municipality probe result: %+v", probeMuni)
+	}
+
+	// JSON response
+	jsonSample := `{"ret":"ok","data":{"ip":"120.231.188.108","location":["中国","广东","江门","","移动"]}}`
+	probeJSON, err := parseIPIPOutput(jsonSample)
+	if err != nil {
+		t.Fatalf("parseIPIPOutput(json) error = %v", err)
+	}
+	if probeJSON.IP != "120.231.188.108" || probeJSON.Country != "中国" || probeJSON.Region != "广东" || probeJSON.City != "江门" {
+		t.Fatalf("unexpected json probe result: %+v", probeJSON)
 	}
 }

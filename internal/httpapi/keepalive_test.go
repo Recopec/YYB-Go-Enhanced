@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -512,4 +515,49 @@ func insertKeepAliveTestAccount(t *testing.T, app *App, openID string, expiresAt
 		t.Fatalf("UpsertAccount() error = %v", err)
 	}
 	return acc
+}
+
+func TestHandleAccountRefreshForce(t *testing.T) {
+	app := newKeepAliveTestApp(t)
+	defer app.Close()
+
+	acc := insertKeepAliveTestAccount(t, app, "openid-force-refresh", time.Now().Add(2*time.Hour))
+	calls := 0
+	app.refreshCredentials = func(_ context.Context, creds protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
+		calls++
+		creds.AccessToken = "access-forced"
+		creds.ExpiresAt = time.Now().Add(7200 * time.Second).Unix()
+		return creds, nil
+	}
+	app.fetchLoginBuffer = func(context.Context, protocol.LoginBufferCredentials) (string, error) {
+		return "buffer-forced", nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/accounts/refresh", strings.NewReader(fmt.Sprintf(`{"ref":"%d","force":false}`, acc.ID)))
+	rec := httptest.NewRecorder()
+	app.handleAccountRefresh(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("calls = %d, want 0 when force is false and credentials fresh", calls)
+	}
+
+	reqForce := httptest.NewRequest(http.MethodPost, "/accounts/refresh", strings.NewReader(fmt.Sprintf(`{"ref":"%d","force":true}`, acc.ID)))
+	recForce := httptest.NewRecorder()
+	app.handleAccountRefresh(recForce, reqForce)
+	if recForce.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recForce.Code, recForce.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 when force is true", calls)
+	}
+
+	updated, err := app.db.GetAccount(context.Background(), acc.ID)
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if updated.LoginBuffer != "buffer-forced" || updated.Credentials["accesstoken"] != "access-forced" {
+		t.Fatalf("account credentials were not updated: %#v", updated.Credentials)
+	}
 }

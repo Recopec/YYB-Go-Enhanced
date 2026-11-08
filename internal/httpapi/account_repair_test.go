@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"yyb_go/internal/qr"
 	"yyb_go/internal/store"
 )
 
@@ -98,5 +100,44 @@ func TestDropQRSessionMarksCancelled(t *testing.T) {
 	}
 	if app.getQRSession("old-session") != nil {
 		t.Fatal("dropQRSession() left the session in the active map")
+	}
+}
+
+func TestPollQRSessionExpiredReturnsExpired(t *testing.T) {
+	t.Setenv("GIN_MODE", "test")
+	app, err := NewApp(Config{
+		ResourceRoot: t.TempDir(),
+		QRSessionTTL: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	sess := &qr.Session{
+		ID:        "expired-session",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+	}
+	app.qrSessions["expired-session"] = &qrLoginSession{
+		Session: sess,
+	}
+
+	handler := app.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/qr/expired-session/poll", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	data, ok := res["data"].(map[string]any)
+	if !ok || data["status"] != "expired" {
+		t.Fatalf("expected data.status expired, got %v", res)
+	}
+	if app.getQRSession("expired-session") != nil {
+		t.Fatal("expected expired session to be dropped from qrSessions")
 	}
 }

@@ -74,3 +74,29 @@ func TestNormalizeSpecRejectsInvalidConfiguration(t *testing.T) {
 		}
 	}
 }
+
+// Pinzan answers "套餐不存在" for a wrong secret, a wrong package number and a
+// deleted package alike, so the surfaced error must not leave the operator
+// thinking a topped-up balance is enough.
+func TestParseResponseExplainsPackageMismatch(t *testing.T) {
+	body := []byte(`{"code":-1,"data":null,"status":200,"message":"套餐不存在"}`)
+	_, err := ParseResponse(body)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	message := err.Error()
+	for _, want := range []string{"套餐不存在", "no", "secret", "余额"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message %q missing %q", message, want)
+		}
+	}
+}
+
+// Unrelated provider messages must pass through untouched.
+func TestParseResponseKeepsOtherProviderMessages(t *testing.T) {
+	body := []byte(`{"code":-1,"message":"签名错误"}`)
+	_, err := ParseResponse(body)
+	if err == nil || !strings.Contains(err.Error(), "签名错误") || strings.Contains(err.Error(), "余额") {
+		t.Fatalf("unexpected error %v", err)
+	}
+}

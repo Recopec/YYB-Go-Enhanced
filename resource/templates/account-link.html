@@ -29,7 +29,7 @@
 <script src="/static/js/account-link-multi.js?v=0302"></script>
   <script>
     const token=location.pathname.split('/').filter(Boolean).pop();
-    const $=id=>document.getElementById(id);let sid='',timer=null,expiryTimer=null,pollBusy=false,linkExpiresAt=0,saveAttempts=0;
+    const $=id=>document.getElementById(id);let sid='',timer=null,expiryTimer=null,pollBusy=false,linkExpiresAt=0,saveAttempts=0,pollFailures=0;
 	let generation=0,meta=null,selectedProduct='',confirmedProduct='',saving=false,completed=false;
     $('scanProduct').replaceChildren(...scanChannels().map(channel=>{const option=document.createElement('option');option.value=channel.id;option.textContent=channel.name;return option;}));
     async function api(path,options={}){const response=await fetch(`/account-link/${encodeURIComponent(token)}${path}`,{cache:'no-store',...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const text=await response.text();let data;try{data=text?JSON.parse(text):null}catch{const error=new Error(`服务返回异常（HTTP ${response.status}）`);error.status=response.status;throw error}if(!response.ok){const error=new Error(data?.msg||'链接已失效或授权失败');error.status=response.status;error.data=data?.data;throw error}return data.data??data}
@@ -47,7 +47,7 @@
     }
     async function create(){
       if(saving)return;
-      const currentGeneration=++generation;stop();saveAttempts=0;
+      const currentGeneration=++generation;stop();saveAttempts=0;pollFailures=0;
       const previous=sid;sid='';
       if(previous){try{await api(`/qr/${encodeURIComponent(previous)}/cancel`,{method:'POST',body:'{}'});}catch{}}
       if(currentGeneration!==generation)return;
@@ -70,6 +70,7 @@
       pollBusy=current;
       try{
         const result=await api(`/qr/${encodeURIComponent(current)}/poll`);
+        pollFailures=0;
         if(current!==sid||currentGeneration!==generation)return;
         if(result.status==='pending'){setState('等待扫码');}
         else if(result.status==='scanned'){setState('已扫码，请在手机上确认授权');}
@@ -94,7 +95,11 @@
           stop();setState(error.message,'error');$('retry').classList.remove('hidden');
         }else if((error.status===409||error.status===502)&&saveAttempts>0&&saveAttempts<12){
           setState('授权已确认，正在自动完成账号保存');setTimeout(()=>{if(current===sid&&currentGeneration===generation)poll();},1500);
-        }else{setState(error.message||'网络暂时波动，正在自动重试','error');if(!timer)$('retry').classList.remove('hidden');}
+        }else{
+          pollFailures++;
+          if(pollFailures>=3){stop();setState('与微信或代理连接中断（二维码已失效），请重新生成','error');$('retry').classList.remove('hidden');}
+          else{setState(error.message||`网络连接波动，正在自动重试 (${pollFailures}/3)…`,'error');if(!timer)$('retry').classList.remove('hidden');}
+        }
       }finally{
         saving=false;$('scanProduct').disabled=completed;$('retry').disabled=false;
         if(pollBusy===current)pollBusy=false;

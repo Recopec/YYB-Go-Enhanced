@@ -565,6 +565,14 @@ func (a *App) handleAccountLink(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]any{"status": "authorized"})
 			return
 		}
+		if login.Session != nil && login.Session.Age() > a.cfg.QRSessionTTL {
+			a.dropQRSession(sessionID)
+			writeJSON(w, http.StatusOK, qr.PollResult{
+				Status:  "expired",
+				Message: "二维码已超过有效期",
+			})
+			return
+		}
 		result, err := login.Client.PollQRCode(r.Context(), login.Session)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())

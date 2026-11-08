@@ -81,7 +81,7 @@ func (a *App) handleIntegrationAccounts(w http.ResponseWriter, r *http.Request) 
 	out := make([]map[string]any, 0, len(accounts))
 	for _, account := range accounts {
 		public := account.Public()
-		out = append(out, map[string]any{
+		item := map[string]any{
 			"id": public.ID, "display_name": firstNonEmpty(deref(public.Remark), deref(public.Nickname), deref(public.Alias), "账号"),
 			"remark": deref(public.Remark), "status": deref(public.Status), "openid_masked": maskIntegrationValue(public.OpenID),
 			// Scan channel the account was onboarded on (appstore/pcmgr/
@@ -89,7 +89,11 @@ func (a *App) handleIntegrationAccounts(w http.ResponseWriter, r *http.Request) 
 			// only to report or balance across channels.
 			"scan_product": public.ScanProduct,
 			"updated_at":   public.UpdatedAt,
-		})
+		}
+		if public.ExpiredAt != nil {
+			item["expired_at"] = *public.ExpiredAt
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out, "count": len(out)})
 }
@@ -198,7 +202,17 @@ func (a *App) handleIntegrationRefreshAccount(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	status, refreshErr := a.refreshLiveness(r.Context(), account)
+	var status string
+	var refreshErr error
+	if body.Force {
+		status, _, refreshErr = a.refreshAccount(r.Context(), account, true)
+		status = a.finishLivenessRefresh(r.Context(), account, status)
+	} else {
+		status, refreshErr = a.refreshLiveness(r.Context(), account)
+	}
+	if fresh, err := a.db.GetAccount(r.Context(), account.ID); err == nil && fresh != nil {
+		account = fresh
+	}
 	writeJSON(w, http.StatusOK, refreshOut(account, status, refreshErr))
 }
 

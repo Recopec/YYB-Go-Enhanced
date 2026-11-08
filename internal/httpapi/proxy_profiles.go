@@ -28,10 +28,39 @@ const (
 
 func juliangEndpointForTradeNo(tradeNo string) string {
 	clean := strings.TrimSpace(tradeNo)
-	if strings.HasPrefix(clean, "64") {
+	if strings.HasPrefix(clean, "6") {
 		return juliangPostpayEndpoint
 	}
 	return juliangAPIEndpoint
+}
+
+func juliangEndpointForTrade(tradeNo, customEndpoint string) string {
+	if customEndpoint != "" {
+		return customEndpoint
+	}
+	return juliangEndpointForTradeNo(tradeNo)
+}
+
+// parseJuliangExtractionURL pulls the package number and signing key out of a
+// pasted extraction link. Juliange has no account/password variant, so a link
+// never carries an authentication mode worth preserving.
+func parseJuliangExtractionURL(raw string) (tradeNo, apiKey, endpoint string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", ""
+	}
+	q := u.Query()
+	tradeNo = strings.TrimSpace(q.Get("trade_no"))
+	apiKey = strings.TrimSpace(q.Get("key"))
+	if strings.Contains(u.Host, "juliangip.com") && strings.HasSuffix(u.Path, "/getips") {
+		cleanU := &url.URL{Scheme: "http", Host: u.Host, Path: u.Path}
+		endpoint = cleanU.String()
+	}
+	return
 }
 
 var (
@@ -56,8 +85,12 @@ type proxyArea struct {
 
 func (a *App) handleProxyProfiles(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/proxy-profiles"), "/")
+	if path == "providers" {
+		a.handleProxyProviders(w, r)
+		return
+	}
 	if path == "areas/provinces" {
-		a.handleIPZanAreas(w, r, ipzanProvinceAreasEndpoint)
+		a.handleProxyProvinces(w, r)
 		return
 	}
 	if path == "areas/cities" {
@@ -66,7 +99,11 @@ func (a *App) handleProxyProfiles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "province must be a 6-digit area code")
 			return
 		}
-		a.handleIPZanAreas(w, r, ipzanCityAreasEndpoint+url.QueryEscape(province))
+		a.handleProxyCities(w, r, province)
+		return
+	}
+	if path == "areas/all" {
+		a.handleProxyAreasAll(w, r)
 		return
 	}
 	if path == "" {
@@ -176,13 +213,25 @@ func decodeProxyProfile(w http.ResponseWriter, r *http.Request) (proxyProfileIn,
 		writeError(w, http.StatusBadRequest, "配置名称不能为空且不能超过 50 个字符")
 		return proxyProfileIn{}, false
 	}
+	spec, ok := lookupProxyProviderSpec(body.Provider)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "代理配置类型必须为 static、ipzan 或 juliang")
+		return proxyProfileIn{}, false
+	}
+	if !spec.allowsAuthMode(body.AuthorizationMode) {
+		writeError(w, http.StatusBadRequest, spec.Label+"不支持该授权方式："+body.AuthorizationMode)
+		return proxyProfileIn{}, false
+	}
+	if body.AuthorizationMode == "" {
+		body.AuthorizationMode = spec.defaultAuthMode()
+	}
 	var apiURL string
 	var err error
 	switch body.Provider {
 	case "ipzan":
 		apiURL, err = normalizeIPZanURL(body.APIURL, body.ProxyType, body.AuthorizationMode)
 	case "juliang":
-		apiURL, err = normalizeJuliangProfile(body.APIURL, body.TradeNo, body.APIKey, body.AuthorizationMode)
+		apiURL, err = normalizeJuliangProfile(body.APIURL, body.TradeNo, body.APIKey)
 	case "static":
 		var normalized proxysource.Spec
 		normalized, err = proxysource.NormalizeSpec(proxysource.Spec{
@@ -191,8 +240,6 @@ func decodeProxyProfile(w http.ResponseWriter, r *http.Request) (proxyProfileIn,
 		if err == nil {
 			apiURL = normalized.StaticProxy
 		}
-	default:
-		err = fmt.Errorf("代理配置类型必须为 static、ipzan 或 juliang")
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -202,38 +249,67 @@ func decodeProxyProfile(w http.ResponseWriter, r *http.Request) (proxyProfileIn,
 	return body, true
 }
 
-func normalizeJuliangProfile(raw, tradeNo, apiKey, authorizationMode string) (string, error) {
+func normalizeJuliangProfile(raw, tradeNo, apiKey string) (string, error) {
 	tradeNo = strings.TrimSpace(tradeNo)
 	apiKey = strings.TrimSpace(apiKey)
-	authorizationMode = strings.ToLower(strings.TrimSpace(authorizationMode))
+
+	var customEndpoint string
+
+	if parsedTradeNo, parsedKey, parsedEndpoint := parseJuliangExtractionURL(tradeNo); parsedTradeNo != "" {
+		tradeNo = parsedTradeNo
+		if apiKey == "" && parsedKey != "" {
+			apiKey = parsedKey
+		}
+		if parsedEndpoint != "" {
+			customEndpoint = parsedEndpoint
+		}
+	}
+
 	if tradeNo == "" || apiKey == "" {
 		u, err := url.Parse(strings.TrimSpace(raw))
-		if err == nil && u.Scheme == juliangProfileScheme && u.Host == "company" && u.Path == "/dynamic" {
-			query := u.Query()
-			tradeNo = strings.TrimSpace(query.Get("trade_no"))
-			apiKey = strings.TrimSpace(query.Get("key"))
-			if authorizationMode == "" {
-				authorizationMode = strings.TrimSpace(query.Get("mode"))
+		if err == nil {
+			if u.Scheme == juliangProfileScheme && u.Host == "company" && u.Path == "/dynamic" {
+				query := u.Query()
+				if tradeNo == "" {
+					tradeNo = strings.TrimSpace(query.Get("trade_no"))
+				}
+				if apiKey == "" {
+					apiKey = strings.TrimSpace(query.Get("key"))
+				}
+				if customEndpoint == "" {
+					customEndpoint = strings.TrimSpace(query.Get("endpoint"))
+				}
+			} else if parsedTradeNo, parsedKey, parsedEndpoint := parseJuliangExtractionURL(raw); parsedTradeNo != "" {
+				if tradeNo == "" {
+					tradeNo = parsedTradeNo
+				}
+				if apiKey == "" && parsedKey != "" {
+					apiKey = parsedKey
+				}
+				if customEndpoint == "" && parsedEndpoint != "" {
+					customEndpoint = parsedEndpoint
+				}
 			}
 		}
 	}
 	if len(tradeNo) < 8 || len(tradeNo) > 32 || !digitsOnly(tradeNo) {
 		return "", fmt.Errorf("巨量业务编号必须为 8 到 32 位数字")
 	}
-	if len(apiKey) != 32 || !hexOnly(apiKey) {
-		return "", fmt.Errorf("巨量 API Key 必须为 32 位十六进制字符串")
+	if len(apiKey) != 32 || !alphaNumOnly(apiKey) {
+		return "", fmt.Errorf("巨量 API Key 必须为 32 位字符")
 	}
-	if authorizationMode == "" {
-		authorizationMode = "auth"
-	}
-	if authorizationMode != "auth" && authorizationMode != "whitelist" {
-		return "", fmt.Errorf("巨量授权方式必须为 auth 或 whitelist")
-	}
+	// Juliange's only authentication mechanism is IP whitelisting: there is no
+	// account/password variant, so profiles (including ones stored by older
+	// builds) always normalize back to whitelist.
+	authorizationMode := "whitelist"
 	u := &url.URL{Scheme: juliangProfileScheme, Host: "company", Path: "/dynamic"}
 	query := u.Query()
 	query.Set("trade_no", tradeNo)
 	query.Set("key", strings.ToLower(apiKey))
 	query.Set("mode", authorizationMode)
+	if customEndpoint != "" {
+		query.Set("endpoint", customEndpoint)
+	}
 	u.RawQuery = query.Encode()
 	return u.String(), nil
 }
@@ -282,7 +358,7 @@ func normalizeIPZanURL(raw, proxyType, authorizationMode string) (string, error)
 }
 
 func ipzanURLForRegion(profile *store.ProxyProviderProfile, regionCode string) (string, error) {
-	base, err := normalizeIPZanURL(profile.APIURL, profile.ProxyType, "")
+	base, err := normalizeIPZanURL(profile.APIURL, profile.ProxyType, profile.AuthorizationMode)
 	if err != nil {
 		return "", err
 	}
@@ -302,7 +378,7 @@ func ipzanURLForRegion(profile *store.ProxyProviderProfile, regionCode string) (
 }
 
 func juliangURLForRegion(profile *store.ProxyProviderProfile, province, city string) (string, error) {
-	internalURL, err := normalizeJuliangProfile(profile.APIURL, "", "", "")
+	internalURL, err := normalizeJuliangProfile(profile.APIURL, "", "")
 	if err != nil {
 		return "", err
 	}
@@ -313,14 +389,14 @@ func juliangURLForRegion(profile *store.ProxyProviderProfile, province, city str
 		"num":         "1",
 		"pt":          "1",
 		"result_type": "json2",
+		"ip_remain":   "1",
+		// Juliange offers whitelist authentication only; there is no
+		// account/password mode, so every extraction auto-adds the current
+		// egress IP instead of requesting temporary credentials.
+		"auto_white": "1",
 	}
 	if strings.EqualFold(profile.ProxyType, "socks5") {
 		params["pt"] = "2"
-	}
-	if profileQuery.Get("mode") == "whitelist" {
-		params["auto_white"] = "1"
-	} else {
-		params["auth_type"] = "2"
 	}
 	if province = normalizeRegionName(province); province != "" {
 		params["province"] = province
@@ -329,7 +405,7 @@ func juliangURLForRegion(profile *store.ProxyProviderProfile, province, city str
 		params["city"] = city
 	}
 	params["sign"] = juliangSign(params, profileQuery.Get("key"))
-	endpoint, _ := url.Parse(juliangEndpointForTradeNo(params["trade_no"]))
+	endpoint, _ := url.Parse(juliangEndpointForTrade(params["trade_no"], profileQuery.Get("endpoint")))
 	query := endpoint.Query()
 	for key, value := range params {
 		query.Set(key, value)
@@ -351,8 +427,19 @@ func proxyProfileURLForRegion(profile *store.ProxyProviderProfile, regionCode, p
 
 func normalizeRegionName(value string) string {
 	value = strings.TrimSpace(value)
-	for _, suffix := range []string{"壮族自治区", "回族自治区", "维吾尔自治区", "特别行政区", "自治区", "省", "市"} {
-		value = strings.TrimSuffix(value, suffix)
+	suffixes := []string{
+		"哈尼族彝族自治州", "壮族苗族自治州", "苗族侗族自治州", "土家族苗族自治州",
+		"布依族苗族自治州", "蒙古族藏族自治州", "藏族羌族自治州", "傣族景颇族自治州",
+		"白族自治州", "傣族自治州", "彝族自治州", "藏族自治州", "回族自治州",
+		"哈萨克自治州", "蒙古自治州", "柯尔克孜自治州", "傈僳族自治州", "朝鲜族自治州",
+		"壮族自治区", "回族自治区", "维吾尔自治区", "特别行政区", "自治区",
+		"自治州", "地区", "特区", "林区", "盟", "省", "市",
+	}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(value, suffix) && len(value) > len(suffix) {
+			value = strings.TrimSuffix(value, suffix)
+			break
+		}
 	}
 	return value
 }
@@ -375,7 +462,7 @@ func juliangSign(params map[string]string, apiKey string) string {
 }
 
 func (a *App) normalizeAccountProxyInput(ctx context.Context, body accountProxyIn) (accountProxyIn, proxysource.Spec, error) {
-	if body.ProtocolProxyMode != nil && *body.ProtocolProxyMode != "account" && *body.ProtocolProxyMode != "direct" {
+	if body.ProtocolProxyMode != nil && *body.ProtocolProxyMode != store.ProtocolProxyModeAccount && *body.ProtocolProxyMode != store.ProtocolProxyModeDirect {
 		return accountProxyIn{}, proxysource.Spec{}, fmt.Errorf("小程序调用出口必须为 account（跟随账号）或 direct（直连）")
 	}
 	body.RegionCode = strings.TrimSpace(body.RegionCode)
@@ -442,6 +529,57 @@ func (a *App) proxySpecForSetting(ctx context.Context, setting *store.AccountPro
 	return proxysource.NormalizeSpec(proxysource.Spec{Mode: "api", ProxyType: profile.ProxyType, APIURL: apiURL})
 }
 
+func (a *App) handleProxyProvinces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if ipzanProvinceAreasEndpoint != "https://service.ipzan.com/area-get-province" {
+		a.handleIPZanAreas(w, r, ipzanProvinceAreasEndpoint)
+		return
+	}
+	data, err := a.getPersistedProxyAreas(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取地区数据失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, data.Provinces)
+}
+
+func (a *App) handleProxyCities(w http.ResponseWriter, r *http.Request, province string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if ipzanCityAreasEndpoint != "https://service.ipzan.com/area-find-citys?province=" {
+		a.handleIPZanAreas(w, r, ipzanCityAreasEndpoint+url.QueryEscape(province))
+		return
+	}
+	data, err := a.getPersistedProxyAreas(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取城市数据失败: "+err.Error())
+		return
+	}
+	cities := data.Cities[province]
+	if cities == nil {
+		cities = []proxyArea{}
+	}
+	writeJSON(w, http.StatusOK, cities)
+}
+
+func (a *App) handleProxyAreasAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	data, err := a.getPersistedProxyAreas(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取地区数据失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
+}
+
 func (a *App) handleIPZanAreas(w http.ResponseWriter, r *http.Request, endpoint string) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -456,6 +594,20 @@ func (a *App) handleIPZanAreas(w http.ResponseWriter, r *http.Request, endpoint 
 }
 
 func (a *App) fetchProxyAreas(ctx context.Context, endpoint string) ([]proxyArea, error) {
+	if endpoint == "https://service.ipzan.com/area-get-province" {
+		data, err := a.getPersistedProxyAreas(ctx)
+		if err == nil {
+			return data.Provinces, nil
+		}
+	} else if strings.HasPrefix(endpoint, "https://service.ipzan.com/area-find-citys?province=") {
+		code := strings.TrimPrefix(endpoint, "https://service.ipzan.com/area-find-citys?province=")
+		data, err := a.getPersistedProxyAreas(ctx)
+		if err == nil {
+			if cities, ok := data.Cities[code]; ok {
+				return cities, nil
+			}
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -496,11 +648,11 @@ func digitsOnly(value string) bool {
 	return value != ""
 }
 
-func hexOnly(value string) bool {
+func alphaNumOnly(value string) bool {
 	for _, char := range value {
-		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') {
 			return false
 		}
 	}
-	return value != ""
+	return len(value) > 0
 }

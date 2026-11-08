@@ -22,6 +22,15 @@ func TestAccountProxySettingLifecycle(t *testing.T) {
 	if err != nil || setting.Mode != "direct" || setting.ProtocolProxyMode != "account" {
 		t.Fatalf("default setting = %#v, %v", setting, err)
 	}
+	// Older clients omit the policy; a new row must still store the account default.
+	fresh, err := db.UpsertAccount(context.Background(), "openid-proxy-fresh", "buffer", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("UpsertAccount(fresh) error = %v", err)
+	}
+	freshSetting, err := db.UpsertAccountProxySetting(context.Background(), fresh.ID, "direct", "http", "", "", nil, "", "", "", 0, nil)
+	if err != nil || freshSetting.ProtocolProxyMode != "account" || freshSetting.RefreshAheadSeconds != DefaultProxyRefreshAheadSeconds {
+		t.Fatalf("nil policy insert = %#v, %v", freshSetting, err)
+	}
 	policy := "direct"
 	setting, err = db.UpsertAccountProxySetting(context.Background(), account.ID, "api", "http", "", "https://proxy.example/get?city=jinan", nil, "370100", "山东省", "济南市", 900, &policy)
 	if err != nil || setting.Mode != "api" || setting.APIURL == "" {
@@ -53,8 +62,11 @@ func TestProxyProviderProfileLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProxyProviderProfile() error = %v", err)
 	}
+	if profile.AuthorizationMode != "whitelist" {
+		t.Fatalf("expected profile.AuthorizationMode = whitelist, got %s", profile.AuthorizationMode)
+	}
 	profiles, err := db.ListProxyProviderProfiles(context.Background())
-	if err != nil || len(profiles) != 1 || profiles[0].ID != profile.ID {
+	if err != nil || len(profiles) != 1 || profiles[0].ID != profile.ID || profiles[0].AuthorizationMode != "whitelist" {
 		t.Fatalf("ListProxyProviderProfiles() = %#v, %v", profiles, err)
 	}
 	profile, err = db.UpdateProxyProviderProfile(context.Background(), profile.ID, "济南套餐", "ipzan", "socks5", profile.APIURL)

@@ -8,7 +8,15 @@ import (
 	"time"
 )
 
-const DefaultProxyRefreshAheadSeconds int64 = 300
+const (
+	DefaultProxyRefreshAheadSeconds int64 = 300
+
+	ProtocolProxyModeAccount = "account"
+	ProtocolProxyModeDirect  = "direct"
+	// DefaultProtocolProxyMode keeps mini-program calls on the same egress as
+	// the account unless the operator explicitly selects direct.
+	DefaultProtocolProxyMode = ProtocolProxyModeAccount
+)
 
 type AccountProxySetting struct {
 	AccountID           int64  `json:"account_id"`
@@ -47,23 +55,27 @@ func (db *DB) AccountProxySettingOrDefault(ctx context.Context, accountID int64)
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	return &AccountProxySetting{AccountID: accountID, Mode: "direct", ProxyType: "http", RefreshAheadSeconds: DefaultProxyRefreshAheadSeconds, ProtocolProxyMode: "account"}, nil
+	return &AccountProxySetting{AccountID: accountID, Mode: "direct", ProxyType: "http", RefreshAheadSeconds: DefaultProxyRefreshAheadSeconds, ProtocolProxyMode: DefaultProtocolProxyMode}, nil
 }
 
 // A nil protocolProxyMode preserves the policy when an older client saves a setting.
 func (db *DB) UpsertAccountProxySetting(ctx context.Context, accountID int64, mode, proxyType, staticProxy, apiURL string, profileID *int64, regionCode, regionProvince, regionCity string, refreshAheadSeconds int64, protocolProxyMode *string) (*AccountProxySetting, error) {
-	if protocolProxyMode != nil && *protocolProxyMode != "account" && *protocolProxyMode != "direct" {
+	if protocolProxyMode != nil && *protocolProxyMode != ProtocolProxyModeAccount && *protocolProxyMode != ProtocolProxyModeDirect {
 		return nil, fmt.Errorf("protocol_proxy_mode must be account or direct")
 	}
 	if refreshAheadSeconds <= 0 {
 		refreshAheadSeconds = DefaultProxyRefreshAheadSeconds
+	}
+	insertProtocolProxyMode := DefaultProtocolProxyMode
+	if protocolProxyMode != nil {
+		insertProtocolProxyMode = *protocolProxyMode
 	}
 	now := time.Now().Unix()
 	_, err := db.sql.ExecContext(ctx, `
 INSERT INTO account_proxy_settings
 (account_id, mode, proxy_type, static_proxy, api_url, provider_profile_id, region_code,
  region_province, region_city, refresh_ahead_seconds, protocol_proxy_mode, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,COALESCE(?, 'account'),?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(account_id) DO UPDATE SET
 mode=excluded.mode, proxy_type=excluded.proxy_type, static_proxy=excluded.static_proxy,
 api_url=excluded.api_url, provider_profile_id=excluded.provider_profile_id,
@@ -72,7 +84,7 @@ region_city=excluded.region_city, refresh_ahead_seconds=excluded.refresh_ahead_s
 protocol_proxy_mode=COALESCE(?, account_proxy_settings.protocol_proxy_mode),
 updated_at=excluded.updated_at`,
 		accountID, mode, proxyType, staticProxy, apiURL, profileID, regionCode,
-		regionProvince, regionCity, refreshAheadSeconds, protocolProxyMode, now, now, protocolProxyMode,
+		regionProvince, regionCity, refreshAheadSeconds, insertProtocolProxyMode, now, now, protocolProxyMode,
 	)
 	if err != nil {
 		return nil, err

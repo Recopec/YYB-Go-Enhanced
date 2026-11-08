@@ -120,7 +120,7 @@ func ParseResponse(body []byte) (Endpoint, error) {
 			return endpoint, nil
 		}
 		if message := responseMessage(value); message != "" {
-			return Endpoint{}, fmt.Errorf("代理 API 返回错误: %s", message)
+			return Endpoint{}, fmt.Errorf("代理 API 返回错误: %s", providerErrorHint(message))
 		}
 	}
 	for _, line := range strings.FieldsFunc(text, func(r rune) bool {
@@ -139,6 +139,21 @@ func ParseResponse(body []byte) (Endpoint, error) {
 		}
 	}
 	return Endpoint{}, fmt.Errorf("无法从代理 API 响应解析 IP 和端口，支持 txt、json、json2")
+}
+
+// providerErrorHint expands provider messages that are easy to misread.
+// Pinzan returns the same "套餐不存在" for a wrong secret, a wrong package
+// number, and a deleted package, so an account balance is never the answer.
+func providerErrorHint(message string) string {
+	switch {
+	case strings.Contains(message, "套餐不存在"),
+		strings.Contains(message, "套餐已过期"),
+		strings.Contains(message, "套餐已停用"):
+		return message + "（该提示表示 no/secret 与后台套餐对不上：请从品赞后台该套餐的提取链接重新复制 no 与 secret；账户余额不等于可用套餐，密码错误也会返回同一提示）"
+	case strings.Contains(message, "缺少提取分钟数"):
+		return message + "（品赞的隧道/长效套餐必须在提取链接里带 minute=提取分钟数，例如 minute=5；直接从后台复制整条提取链接即可）"
+	}
+	return message
 }
 
 func responseMessage(value any) string {

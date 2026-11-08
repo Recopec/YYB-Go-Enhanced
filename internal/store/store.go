@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS wechat_accounts (
     credentials     TEXT,
     status          TEXT,
     last_checked_at INTEGER,
+    expired_at      INTEGER,
+    refresh_token_observed_at INTEGER,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL
 );
@@ -167,9 +169,13 @@ type WechatAccount struct {
 	Status         *string        `json:"status,omitempty"`
 	LastCheckedAt  *int64         `json:"last_checked_at,omitempty"`
 	FleetPrimaryID *int64         `json:"fleet_primary_id,omitempty"`
-	CreatedAt      int64          `json:"created_at"`
-	UpdatedAt      int64          `json:"updated_at"`
-	credentialJSON sql.NullString
+	ExpiredAt      *int64         `json:"expired_at,omitempty"`
+	// RefreshTokenObservedAt keeps the scan time even after expiry clears the
+	// credentials blob, so the console can still show the online duration.
+	RefreshTokenObservedAt *int64 `json:"refresh_token_observed_at,omitempty"`
+	CreatedAt              int64  `json:"created_at"`
+	UpdatedAt              int64  `json:"updated_at"`
+	credentialJSON         sql.NullString
 }
 
 type AccountPublic struct {
@@ -184,12 +190,16 @@ type AccountPublic struct {
 	Avatar                 *string `json:"avatar"`
 	Status                 *string `json:"status"`
 	RefreshTokenObservedAt *int64  `json:"refresh_token_observed_at,omitempty"`
-	CredentialExpiresAt    *int64  `json:"credential_expires_at,omitempty"`
-	CredentialExpiresIn    int64   `json:"credential_expires_in,omitempty"`
-	RescanRecommended      bool    `json:"rescan_recommended"`
-	LastCheckedAt          *int64  `json:"last_checked_at"`
-	CreatedAt              int64   `json:"created_at"`
-	UpdatedAt              int64   `json:"updated_at"`
+	// RefreshTokenObservedEstimated is true when the scan time had to be taken
+	// from created_at because an older build erased it on expiry.
+	RefreshTokenObservedEstimated bool   `json:"refresh_token_observed_estimated,omitempty"`
+	CredentialExpiresAt           *int64 `json:"credential_expires_at,omitempty"`
+	CredentialExpiresIn           int64  `json:"credential_expires_in,omitempty"`
+	RescanRecommended             bool   `json:"rescan_recommended"`
+	LastCheckedAt                 *int64 `json:"last_checked_at"`
+	ExpiredAt                     *int64 `json:"expired_at,omitempty"`
+	CreatedAt                     int64  `json:"created_at"`
+	UpdatedAt                     int64  `json:"updated_at"`
 }
 
 type SessionRow struct {
@@ -243,6 +253,14 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	if err = migrateAccountRemark(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = migrateAccountExpiredAt(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err = migrateAccountScanObservedAt(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -411,6 +429,42 @@ func migrateAccountFleet(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
+func migrateAccountExpiredAt(ctx context.Context, db *sql.DB) error {
+	exists, err := sqliteColumnExists(ctx, db, "wechat_accounts", "expired_at")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err = db.ExecContext(ctx, "ALTER TABLE wechat_accounts ADD COLUMN expired_at INTEGER"); err != nil {
+			return err
+		}
+	}
+	_, err = db.ExecContext(ctx, "UPDATE wechat_accounts SET expired_at = COALESCE(last_checked_at, updated_at) WHERE status = 'expired' AND expired_at IS NULL")
+	return err
+}
+
+func migrateAccountScanObservedAt(ctx context.Context, db *sql.DB) error {
+	exists, err := sqliteColumnExists(ctx, db, "wechat_accounts", "refresh_token_observed_at")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err = db.ExecContext(ctx, "ALTER TABLE wechat_accounts ADD COLUMN refresh_token_observed_at INTEGER"); err != nil {
+			return err
+		}
+	}
+	// Older builds wiped the whole credentials blob when an account expired,
+	// which also erased the scan timestamp the console uses to show how long the
+	// account stayed online. Keep it in its own column and rescue it from rows
+	// that still have credentials.
+	_, err = db.ExecContext(ctx, `UPDATE wechat_accounts
+SET refresh_token_observed_at = CAST(json_extract(credentials, '$.refresh_token_observed_at') AS INTEGER)
+WHERE refresh_token_observed_at IS NULL
+  AND json_valid(credentials)
+  AND CAST(json_extract(credentials, '$.refresh_token_observed_at') AS INTEGER) > 0`)
+	return err
+}
+
 func migrateAccountProxySettings(ctx context.Context, db *sql.DB) error {
 	columns := []struct {
 		name       string
@@ -464,6 +518,7 @@ func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ali
 		return nil, errors.New("openid is required")
 	}
 	now := time.Now().Unix()
+	observedAt := observedAtValue(credentials)
 	userJSON, err := marshalNullable(userInfo)
 	if err != nil {
 		return nil, err
@@ -500,9 +555,9 @@ func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ali
 			}
 		}
 		_, err = tx.ExecContext(ctx,
-			`UPDATE wechat_accounts SET login_buffer=?, alias=?, nickname=?, avatar=?, user_info=?, credentials=?, status=?, updated_at=? WHERE id=?`,
+			`UPDATE wechat_accounts SET login_buffer=?, alias=?, nickname=?, avatar=?, user_info=?, credentials=?, status=?, refresh_token_observed_at=COALESCE(?, refresh_token_observed_at), expired_at=CASE WHEN ?='expired' THEN COALESCE(expired_at, ?) ELSE NULL END, updated_at=? WHERE id=?`,
 			loginBuffer, nullableString(alias), nullableString(nickname), nullableString(avatar),
-			userJSON, credJSON, nullableString(status), now, existingID,
+			userJSON, credJSON, nullableString(status), observedAt, nullableString(status), now, now, existingID,
 		)
 	} else if errors.Is(err, sql.ErrNoRows) {
 		rows, queryErr := tx.QueryContext(ctx, "SELECT id FROM wechat_accounts ORDER BY id")
@@ -530,12 +585,16 @@ func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ali
 			return nil, queryErr
 		}
 		_ = rows.Close()
+		var expiredAt any
+		if status != nil && *status == "expired" {
+			expiredAt = now
+		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO wechat_accounts
-			(id, openid, login_buffer, alias, nickname, avatar, user_info, credentials, status, created_at, updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			(id, openid, login_buffer, alias, nickname, avatar, user_info, credentials, status, expired_at, refresh_token_observed_at, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			nextID, openid, loginBuffer, nullableString(alias), nullableString(nickname), nullableString(avatar),
-			userJSON, credJSON, nullableString(status), now, now,
+			userJSON, credJSON, nullableString(status), expiredAt, observedAt, now, now,
 		)
 	} else {
 		return nil, err
@@ -863,8 +922,8 @@ func (db *DB) SetAccountCredential(ctx context.Context, id int64, loginBuffer st
 		return err
 	}
 	_, err = db.sql.ExecContext(ctx,
-		"UPDATE wechat_accounts SET login_buffer=?, credentials=?, updated_at=? WHERE id=?",
-		loginBuffer, credJSON, time.Now().Unix(), id,
+		"UPDATE wechat_accounts SET login_buffer=?, credentials=?, refresh_token_observed_at=COALESCE(?, refresh_token_observed_at), updated_at=? WHERE id=?",
+		loginBuffer, credJSON, observedAtValue(credentials), time.Now().Unix(), id,
 	)
 	return err
 }
@@ -874,10 +933,18 @@ func (db *DB) SetAccountCredentialStatus(ctx context.Context, id int64, loginBuf
 	if err != nil {
 		return err
 	}
+	observedAt := observedAtValue(credentials)
 	now := time.Now().Unix()
+	if status == "expired" {
+		_, err = db.sql.ExecContext(ctx,
+			"UPDATE wechat_accounts SET login_buffer=?, credentials=?, status=?, refresh_token_observed_at=COALESCE(?, refresh_token_observed_at), expired_at=COALESCE(expired_at, ?), last_checked_at=?, updated_at=? WHERE id=?",
+			loginBuffer, credJSON, status, observedAt, now, now, now, id,
+		)
+		return err
+	}
 	_, err = db.sql.ExecContext(ctx,
-		"UPDATE wechat_accounts SET login_buffer=?, credentials=?, status=?, last_checked_at=?, updated_at=? WHERE id=?",
-		loginBuffer, credJSON, status, now, now, id,
+		"UPDATE wechat_accounts SET login_buffer=?, credentials=?, status=?, refresh_token_observed_at=COALESCE(?, refresh_token_observed_at), expired_at=NULL, last_checked_at=?, updated_at=? WHERE id=?",
+		loginBuffer, credJSON, status, observedAt, now, now, id,
 	)
 	return err
 }
@@ -947,13 +1014,13 @@ func (db *DB) SetAccountStatus(ctx context.Context, id int64, status string) err
 			return err
 		}
 		_, err = db.sql.ExecContext(ctx,
-			"UPDATE wechat_accounts SET login_buffer='', credentials=?, status=?, last_checked_at=?, updated_at=? WHERE id=?",
-			kept, status, now, now, id,
+			"UPDATE wechat_accounts SET login_buffer='', credentials=?, status=?, expired_at=COALESCE(expired_at, ?), last_checked_at=?, updated_at=? WHERE id=?",
+			kept, status, now, now, now, id,
 		)
 		return err
 	}
 	_, err := db.sql.ExecContext(ctx,
-		"UPDATE wechat_accounts SET status=?, last_checked_at=?, updated_at=? WHERE id=?",
+		"UPDATE wechat_accounts SET status=?, expired_at=NULL, last_checked_at=?, updated_at=? WHERE id=?",
 		status, now, now, id,
 	)
 	return err
@@ -1173,6 +1240,7 @@ func (a *WechatAccount) Public() AccountPublic {
 	product := a.ScanProduct()
 	var refreshTokenObservedAt *int64
 	rescanRecommended := a.SessionOnly()
+	observedEstimated := false
 	var credentialExpiresAt *int64
 	credentialExpiresIn := int64(0)
 	credentialExpiresAtValue := int64Credential(a.Credentials, "expires_at")
@@ -1180,11 +1248,22 @@ func (a *WechatAccount) Public() AccountPublic {
 	if credentialExpiresIn <= 0 {
 		credentialExpiresIn = 7200
 	}
-	if stringCredential(a.Credentials, "refreshtoken") != "" || a.SessionOnly() {
-		if observedAt := int64Credential(a.Credentials, "refresh_token_observed_at"); observedAt > 0 {
-			refreshTokenObservedAt = &observedAt
+	observedAt := int64Credential(a.Credentials, "refresh_token_observed_at")
+	if observedAt <= 0 && a.RefreshTokenObservedAt != nil {
+		observedAt = *a.RefreshTokenObservedAt
+	}
+	switch {
+	case observedAt > 0:
+		refreshTokenObservedAt = &observedAt
+		if stringCredential(a.Credentials, "refreshtoken") != "" {
 			rescanRecommended = rescanRecommended || time.Now().Unix()-observedAt >= int64((25*24*time.Hour)/time.Second)
 		}
+	case a.CreatedAt > 0 && a.Status != nil && strings.EqualFold(strings.TrimSpace(*a.Status), "expired"):
+		// Pre-migration accounts lost the scan time together with their
+		// credentials. created_at is the only remaining lower bound.
+		createdAt := a.CreatedAt
+		refreshTokenObservedAt = &createdAt
+		observedEstimated = true
 	}
 	if credentialExpiresAtValue <= 0 {
 		if refreshedAt := int64Credential(a.Credentials, "refresh_refreshed_at"); refreshedAt > 0 {
@@ -1222,24 +1301,35 @@ func (a *WechatAccount) Public() AccountPublic {
 			rescanRecommended = true
 		}
 	}
+	expiredAt := a.ExpiredAt
+	if expiredAt == nil && a.Status != nil && strings.EqualFold(strings.TrimSpace(*a.Status), "expired") {
+		if a.LastCheckedAt != nil && *a.LastCheckedAt > 0 {
+			expiredAt = a.LastCheckedAt
+		} else if a.UpdatedAt > 0 {
+			ts := a.UpdatedAt
+			expiredAt = &ts
+		}
+	}
 	return AccountPublic{
-		ScanProduct:            product,
-		FleetPrimaryID:         a.FleetPrimaryID,
-		ID:                     a.ID,
-		OpenID:                 a.OpenID,
-		UIN:                    a.UIN,
-		Alias:                  a.Alias,
-		Nickname:               a.Nickname,
-		Remark:                 a.Remark,
-		Avatar:                 a.Avatar,
-		Status:                 a.Status,
-		RefreshTokenObservedAt: refreshTokenObservedAt,
-		CredentialExpiresAt:    credentialExpiresAt,
-		CredentialExpiresIn:    credentialExpiresIn,
-		RescanRecommended:      rescanRecommended,
-		LastCheckedAt:          a.LastCheckedAt,
-		CreatedAt:              a.CreatedAt,
-		UpdatedAt:              a.UpdatedAt,
+		ScanProduct:                   product,
+		FleetPrimaryID:                a.FleetPrimaryID,
+		ID:                            a.ID,
+		OpenID:                        a.OpenID,
+		UIN:                           a.UIN,
+		Alias:                         a.Alias,
+		Nickname:                      a.Nickname,
+		Remark:                        a.Remark,
+		Avatar:                        a.Avatar,
+		Status:                        a.Status,
+		RefreshTokenObservedAt:        refreshTokenObservedAt,
+		RefreshTokenObservedEstimated: observedEstimated,
+		CredentialExpiresAt:           credentialExpiresAt,
+		CredentialExpiresIn:           credentialExpiresIn,
+		RescanRecommended:             rescanRecommended,
+		LastCheckedAt:                 a.LastCheckedAt,
+		ExpiredAt:                     expiredAt,
+		CreatedAt:                     a.CreatedAt,
+		UpdatedAt:                     a.UpdatedAt,
 	}
 }
 
@@ -1254,6 +1344,13 @@ func keepChannelMarkers(credentials map[string]any) map[string]any {
 	switch provider := stringCredential(credentials, "provider"); provider {
 	case "pcmgr", "gameassist", "qbbrowser", "ldplayer":
 		return map[string]any{"provider": provider}
+	}
+	return nil
+}
+
+func observedAtValue(credentials map[string]any) any {
+	if observedAt := int64Credential(credentials, "refresh_token_observed_at"); observedAt > 0 {
+		return observedAt
 	}
 	return nil
 }
@@ -1274,7 +1371,7 @@ func int64Credential(values map[string]any, key string) int64 {
 	}
 }
 
-const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, remark, avatar, user_info, login_buffer, credentials, status, last_checked_at, created_at, updated_at, fleet_primary_id FROM wechat_accounts`
+const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, remark, avatar, user_info, login_buffer, credentials, status, last_checked_at, expired_at, refresh_token_observed_at, created_at, updated_at, fleet_primary_id FROM wechat_accounts`
 
 type accountScanner interface {
 	Scan(dest ...any) error
@@ -1291,14 +1388,16 @@ func (db *DB) scanAccount(row accountScanner) (*WechatAccount, error) {
 func scanAccountRows(row accountScanner) (*WechatAccount, error) {
 	var (
 		a                               WechatAccount
-		uin, lastChecked, fleetPrimary  sql.NullInt64
+		uin, lastChecked, expiredAt     sql.NullInt64
+		observedAt                      sql.NullInt64
+		fleetPrimary                    sql.NullInt64
 		alias, nickname, remark, avatar sql.NullString
 		userJSON, credJSON              sql.NullString
 		status                          sql.NullString
 	)
 	err := row.Scan(
 		&a.ID, &a.OpenID, &uin, &alias, &nickname, &remark, &avatar, &userJSON,
-		&a.LoginBuffer, &credJSON, &status, &lastChecked, &a.CreatedAt, &a.UpdatedAt, &fleetPrimary,
+		&a.LoginBuffer, &credJSON, &status, &lastChecked, &expiredAt, &observedAt, &a.CreatedAt, &a.UpdatedAt, &fleetPrimary,
 	)
 	if err != nil {
 		return nil, err
@@ -1313,6 +1412,12 @@ func scanAccountRows(row accountScanner) (*WechatAccount, error) {
 	a.Status = stringPtrFromNull(status)
 	if lastChecked.Valid {
 		a.LastCheckedAt = &lastChecked.Int64
+	}
+	if expiredAt.Valid {
+		a.ExpiredAt = &expiredAt.Int64
+	}
+	if observedAt.Valid {
+		a.RefreshTokenObservedAt = &observedAt.Int64
 	}
 	if fleetPrimary.Valid {
 		a.FleetPrimaryID = &fleetPrimary.Int64

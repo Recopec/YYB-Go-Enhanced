@@ -168,9 +168,10 @@ func TestSetAccountStatusExpiredClearsCredentials(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 	status := "alive"
+	observedAt := time.Now().Add(-90 * time.Minute).Unix()
 	account, err := db.UpsertAccount(ctx, "expired-openid", "login-buffer", nil, nil, nil, nil, map[string]any{
 		"refreshtoken":              "refresh-token",
-		"refresh_token_observed_at": time.Now().Unix(),
+		"refresh_token_observed_at": observedAt,
 		"expires_at":                time.Now().Add(time.Hour).Unix(),
 	}, &status)
 	if err != nil {
@@ -186,6 +187,60 @@ func TestSetAccountStatusExpiredClearsCredentials(t *testing.T) {
 	if updated.LoginBuffer != "" || updated.Credentials != nil || updated.Status == nil || *updated.Status != "expired" {
 		t.Fatalf("expired account still retains credentials: %+v", updated)
 	}
+	if updated.ExpiredAt == nil || *updated.ExpiredAt <= 0 {
+		t.Fatalf("expired account missing ExpiredAt: %+v", updated)
+	}
+	if updated.RefreshTokenObservedAt == nil || *updated.RefreshTokenObservedAt != observedAt {
+		t.Fatalf("expired account lost the scan time: %+v", updated)
+	}
+	public := updated.Public()
+	if public.ExpiredAt == nil || *public.ExpiredAt != *updated.ExpiredAt {
+		t.Fatalf("AccountPublic missing matching ExpiredAt: %+v", public)
+	}
+	if public.RefreshTokenObservedAt == nil || *public.RefreshTokenObservedAt != observedAt || public.RefreshTokenObservedEstimated {
+		t.Fatalf("AccountPublic scan time = %#v, estimated = %v, want %d exact", public.RefreshTokenObservedAt, public.RefreshTokenObservedEstimated, observedAt)
+	}
+}
+
+func TestAccountExpiredAtLifecycle(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	status := "alive"
+	account, err := db.UpsertAccount(ctx, "lifecycle-openid", "buffer", nil, nil, nil, nil, nil, &status)
+	if err != nil {
+		t.Fatalf("UpsertAccount() error = %v", err)
+	}
+	if account.ExpiredAt != nil {
+		t.Fatalf("initial alive account should not have ExpiredAt, got %v", account.ExpiredAt)
+	}
+	if err := db.SetAccountStatus(ctx, account.ID, "expired"); err != nil {
+		t.Fatalf("SetAccountStatus(expired) error = %v", err)
+	}
+	expired, err := db.GetAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if expired.ExpiredAt == nil || *expired.ExpiredAt <= 0 {
+		t.Fatalf("expired account should have ExpiredAt set, got nil")
+	}
+	origExpiredAt := *expired.ExpiredAt
+
+	// Setting status back to alive should clear ExpiredAt
+	if err := db.SetAccountStatus(ctx, account.ID, "alive"); err != nil {
+		t.Fatalf("SetAccountStatus(alive) error = %v", err)
+	}
+	alive, err := db.GetAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if alive.ExpiredAt != nil {
+		t.Fatalf("reactivated account should clear ExpiredAt, got %v", alive.ExpiredAt)
+	}
+	_ = origExpiredAt
 }
 
 func TestUpsertAccountReusesLowestFreeID(t *testing.T) {
@@ -505,5 +560,75 @@ func TestCompactAccountIDsRemapsChildren(t *testing.T) {
 	}
 	if err = db.sql.QueryRowContext(ctx, "SELECT api_url FROM account_proxy_settings WHERE account_id=3").Scan(&proxyURL); err != nil || proxyURL != "" {
 		t.Fatalf("account 5 proxy association lost = %q, err = %v", proxyURL, err)
+	}
+}
+
+func TestOpenRescuesScanTimeFromLegacyCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "yyb.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	ctx := context.Background()
+	if _, err = raw.ExecContext(ctx, `
+CREATE TABLE wechat_accounts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    openid          TEXT    NOT NULL UNIQUE,
+    uin             INTEGER,
+    alias           TEXT,
+    nickname        TEXT,
+    remark          TEXT,
+    avatar          TEXT,
+    user_info       TEXT,
+    login_buffer    TEXT    NOT NULL,
+    credentials     TEXT,
+    status          TEXT,
+    last_checked_at INTEGER,
+    expired_at      INTEGER,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+INSERT INTO wechat_accounts
+  (id, openid, login_buffer, credentials, status, last_checked_at, expired_at, created_at, updated_at)
+VALUES(1, 'legacy-openid', '', '{"refreshtoken":"refresh","refresh_token_observed_at":1793000000}', 'alive', 1793003600, NULL, 1793000000, 1793003600);
+`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatalf("close seed db: %v", err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+	account, err := db.GetAccount(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if account.RefreshTokenObservedAt == nil || *account.RefreshTokenObservedAt != 1793000000 {
+		t.Fatalf("RefreshTokenObservedAt = %#v, want 1793000000", account.RefreshTokenObservedAt)
+	}
+}
+
+func TestAccountPublicEstimatesScanTimeOnlyForExpiredAccounts(t *testing.T) {
+	status := "expired"
+	createdAt := int64(1793000000)
+	expiredAt := int64(1793200000)
+	expired := &WechatAccount{Status: &status, CreatedAt: createdAt, ExpiredAt: &expiredAt}
+	public := expired.Public()
+	if public.RefreshTokenObservedAt == nil || *public.RefreshTokenObservedAt != createdAt || !public.RefreshTokenObservedEstimated {
+		t.Fatalf("expired fallback scan time = %#v, estimated = %v", public.RefreshTokenObservedAt, public.RefreshTokenObservedEstimated)
+	}
+	if public.ExpiredAt == nil || *public.ExpiredAt != expiredAt {
+		t.Fatalf("ExpiredAt = %#v, want %d", public.ExpiredAt, expiredAt)
+	}
+
+	alive := "alive"
+	public = (&WechatAccount{Status: &alive, CreatedAt: createdAt}).Public()
+	if public.RefreshTokenObservedAt != nil || public.RefreshTokenObservedEstimated {
+		t.Fatalf("alive account without observation = %#v, estimated = %v, want 未记录", public.RefreshTokenObservedAt, public.RefreshTokenObservedEstimated)
 	}
 }

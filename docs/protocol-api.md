@@ -17,7 +17,7 @@ YYB Go Enhanced 提供 `/wxapp/*` 标准入口和 `/wx/*` 兼容入口。运行�
 - `app_id` 是目标小程序 AppID。
 - 请求使用 `POST` 和 `Content-Type: application/json`。
 - `wx.login` code 短期且一次性，不能跨请求或跨脚本复用。
-- 小程序调用默认使用账号代理；v0.2.29 起可在「代理设置 → 小程序调用出口」单独选择直连，扫码及凭据刷新仍按账号代理执行，见[分流说明](proxy-keepalive.md#保活走代理小程序调用直连)。
+- 小程序调用默认跟随账号连接模式；可在「代理设置 → 小程序调用出口」单独选择直连（出口无法承载 LongLink 时使用），扫码及凭据刷新仍按账号代理执行，见[分流说明](proxy-keepalive.md#保活走代理小程序调用直连)。
 - v0.2.49 起取码、手机号与通用转发均携带账号所属渠道 HostAppID。PCMgr 手机号按原生 `1141` + JSON 构造，YYB 保留原 `1020` 兼容路径；有请求路径不等于目标小程序已授权。`getuserinfo` 对 PCMgr 读取已保存资料，不检测小程序会话。详见[渠道调用对照](pcmgr-api-paths-20261029.md)。
 
 启用 `YYB_PROTOCOL_TOKEN` 后，所有 `/wx/*` 与 `/wxapp/*` 自动化请求必须增加：

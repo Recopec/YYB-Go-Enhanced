@@ -454,6 +454,19 @@
       100% { opacity: 1; filter: grayscale(0.88) saturate(0.35); }
     }
 
+    .account-card.refreshed-success {
+      animation: refresh-success-pulse 1.8s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @keyframes refresh-success-pulse {
+      0% {
+        box-shadow: 0 0 0 3px oklch(0.65 0.2 145 / 0.55), 0 8px 24px oklch(0.65 0.2 145 / 0.2);
+        border-color: oklch(0.65 0.2 145);
+      }
+      100% {
+        box-shadow: 0 3px 10px oklch(0.2 0.025 252 / .06);
+      }
+    }
+
     .account-card:hover {
       border-color: oklch(0.79 0.025 250);
       box-shadow: 0 3px 10px oklch(0.2 0.025 252 / .06);
@@ -740,7 +753,27 @@
     .lifecycle-track span { display:block; height:100%; border-radius:inherit; background:var(--lifecycle-color,#29934a); transition:width 180ms ease,background-color 180ms ease; }
     .lifecycle-value { min-width:72px; text-align:right; color:var(--faint); white-space:nowrap; font-variant-numeric:tabular-nums; }
     .lifecycle-note { color:var(--muted); font-size:11px; }
-    .lifecycle-inactive { color:var(--muted); font-size:12px; min-height:72px; padding-right:88px; align-content:center; }
+    .lifecycle-inactive {
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 72px;
+      padding-right: 88px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 4px;
+    }
+    .lifecycle-inactive-title {
+      color: var(--muted);
+    }
+    .lifecycle-expired-time {
+      color: oklch(0.52 0.16 25);
+      font-size: 11px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
 
     .result-panel { display: flex; flex-direction: column; }
 
@@ -956,7 +989,7 @@
       .account-confirm-actions .btn { min-height:44px; }
       .mobile-account-actions:not([hidden]) { display:grid; grid-column:1 / -1; gap:10px; padding:12px; border:1px solid var(--line); border-radius:10px; background:oklch(0.978 0.01 3); scroll-margin:80px 0 20px; }
       .mobile-account-actions strong { font-size:13px; overflow-wrap:anywhere; }
-      .mobile-account-buttons { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+      .mobile-account-buttons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
       .platform-main .mobile-account-buttons .btn { padding:8px 4px; }
       .platform-main .mobile-account-buttons .btn, #accountWorkspace > .section-head .btn { min-height:44px; }
       .mobile-account-actions p { margin:0; font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
@@ -983,6 +1016,10 @@
 
       .account-card.expired.expired-alert .avatar,
       .account-card.expired.expired-alert .account-main {
+        animation: none !important;
+      }
+
+      .account-card.refreshed-success {
         animation: none !important;
       }
     }
@@ -1061,6 +1098,7 @@
           <strong id="mobileAccountName">当前账号</strong>
           <div class="mobile-account-buttons">
             <button class="btn primary" id="mobileUpdateAccountBtn" type="button">更新扫码</button>
+            <button class="btn secondary" id="mobileRefreshAccountBtn" type="button" title="使用长效凭据强制向微信刷新当前账号短效凭据">刷新凭据</button>
             <a class="btn secondary" id="mobileProxySettingsLink" href="/proxies">管理代理</a>
             <a class="btn secondary" id="mobileMultiScanLink" href="/scan">多渠道扫码</a>
             <button class="btn secondary" id="mobileSyncAccountBtn" type="button">同步到面板</button>
@@ -1086,6 +1124,7 @@
             <div class="account-tools">
               <input class="input" id="accountRemarkInput" maxlength="80" placeholder="账号备注，例如：Boom">
               <button class="btn secondary" id="saveRemarkBtn" type="button">保存备注</button>
+              <button class="btn secondary" id="refreshAccountBtn" type="button" title="使用长效凭据强制向微信刷新当前账号的短效凭据">刷新凭据</button>
               <button class="btn secondary" id="syncQingLongBtn" type="button">同步到面板</button>
               <button class="btn secondary" id="updateAccountLinkBtn" type="button" title="生成只能更新当前账号的一次性扫码链接">生成更新链接</button>
               <a class="btn secondary" id="multiScanLink" href="/scan" title="给当前账号补扫其他渠道，或重新扫码更新">多渠道扫码</a>
@@ -1325,6 +1364,7 @@
         { name: "oauth", label: "/wx/oauth 公众号授权链接（仅生成）", route: "/wx/oauth", requiresAppID: true }
       ],
       proxyConfigs: new Map(),
+      proxyProfiles: new Map(),
       selectedOpenID: "",
       lastResult: "",
       // Ids that were already expired at the last render. It stays null until the
@@ -1466,7 +1506,13 @@
 
     function proxyText(config) {
       if (!config || !config.configured) return "直连";
-      if (config.provider_profile_id) return `供应商代理${config.region_city ? ` · ${config.region_city}` : config.region_province ? ` · ${config.region_province}` : " · 全国"}`;
+      if (config.provider_profile_id) {
+        const profile = state.proxyProfiles.get(String(config.provider_profile_id));
+        const name = profile?.name || `代理配置 #${config.provider_profile_id}`;
+        if (profile?.provider === "static") return name;
+        const region = config.region_city || config.region_province || "全国";
+        return `${name} · ${region}`;
+      }
       if (config.mode === "static") return "静态代理";
       return "动态代理 API";
     }
@@ -1476,6 +1522,13 @@
       const date = new Date(ts * 1000);
       const pad = n => String(n).padStart(2, "0");
       return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function formatFullTime(ts) {
+      if (!ts) return "未记录";
+      const date = new Date(ts * 1000);
+      const pad = n => String(n).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     }
 
     function lifecycleDuration(seconds) {
@@ -1499,7 +1552,28 @@
     }
 
     function lifecycleMarkup(account) {
-      if (account.status === "expired") return '<span class="account-lifecycle lifecycle-inactive">保活已停止 · 重新扫码后恢复</span>';
+      if (account.status === "expired") {
+        const expiredTs = account.expired_at || account.last_checked_at || account.updated_at;
+        const observedAt = Number(account.refresh_token_observed_at || 0);
+        const observedEstimated = Boolean(account.refresh_token_observed_estimated);
+        const expiredText = expiredTs ? formatChecked(expiredTs) : "";
+        const observedText = observedAt ? `${observedEstimated ? "约 " : ""}${formatChecked(observedAt)}` : "";
+        let lifeText = "";
+        if (observedAt && expiredTs && expiredTs >= observedAt) {
+          const aliveSec = expiredTs - observedAt;
+          lifeText = `扫码 ${observedText} - 失效 ${expiredText}（存活约 ${lifecycleDuration(aliveSec)}）`;
+        } else if (expiredTs) {
+          lifeText = `失效时间: ${expiredText}`;
+        }
+        const titleFull = [
+          observedAt ? `扫码时间${observedEstimated ? "（按账号创建时间估算）" : ""}: ${formatFullTime(observedAt)}` : "",
+          expiredTs ? `确诊失效: ${formatFullTime(expiredTs)}` : ""
+        ].filter(Boolean).join(" · ");
+        return `<span class="account-lifecycle lifecycle-inactive">
+          <span class="lifecycle-inactive-title">保活已停止 · 重新扫码后恢复</span>
+          ${lifeText ? `<span class="lifecycle-expired-time" title="${escapeHTML(titleFull)}">⏱️ ${escapeHTML(lifeText)}</span>` : ""}
+        </span>`;
+      }
       if (account.status === "session_only") return '<span class="account-lifecycle lifecycle-inactive">授权已失效 · 仅尝试原会话，请重新扫码</span>';
       if (account.scan_product === 'ldplayer' || account.scan_product === 'qbbrowser' && !account.credential_expires_at) return '<span class="account-lifecycle lifecycle-inactive">有效期未知 · 自动续期尚未验证，以实际取码结果为准</span>';
       const now = Math.floor(Date.now() / 1000);
@@ -1555,6 +1629,8 @@
       $("accountRemarkInput").value = selected?.remark || "";
       $("accountRemarkInput").disabled = !selected;
       $("saveRemarkBtn").disabled = !selected;
+      $("refreshAccountBtn").disabled = !selected || selected.status === "expired";
+      $("mobileRefreshAccountBtn").disabled = !selected || selected.status === "expired";
       $("syncQingLongBtn").disabled = !selected || state.syncingAccount;
       $("mobileSyncAccountBtn").disabled = !selected || state.syncingAccount;
       $("updateAccountLinkBtn").disabled = !selected;
@@ -1671,8 +1747,14 @@
         const name = accountName(account);
 		const proxy = proxyText(state.proxyConfigs.get(String(account.id)));
         const isExpired = account.status === "expired";
+        const expiredTs = isExpired ? (account.expired_at || account.last_checked_at || account.updated_at) : null;
+        const expiredText = expiredTs ? formatChecked(expiredTs) : "";
+        const expiredFull = expiredTs ? formatFullTime(expiredTs) : "";
         const cls = isExpired ? "expired" : account.rescan_recommended ? "warning" : statusClass(account.status);
         const status = isExpired ? "已失效" : account.status === "session_only" ? "需补授权" : account.rescan_recommended ? "建议重扫" : statusText(account.status);
+        const statusTooltip = isExpired
+          ? (expiredFull ? `已失效（确诊时间：${expiredFull}）` : "已失效，请重新扫码")
+          : (account.rescan_recommended ? "RefreshToken 已使用约 25 天，建议在失效前重新扫码" : "");
         const pendingConfirmation = account.status !== "alive" && account.status !== "expired" && account.status !== "session_only";
         const button = document.createElement("article");
         const justExpired = isExpired && previouslyExpired !== null && !previouslyExpired.has(account.id);
@@ -1691,15 +1773,15 @@
               <span class="account-header-tools">
               ${pendingConfirmation
                 ? `<button type="button" class="account-status account-status-toggle ${cls}" aria-expanded="false" aria-controls="confirm-account-${account.id}" aria-label="确认账号 ${escapeHTML(number)} 的状态"><span class="status-dot"></span>${status}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>`
-                : `<span class="account-status ${cls}" title="${account.status === "session_only" ? "授权已拒绝，原会话可尝试使用，不代表保活恢复" : account.rescan_recommended ? "RefreshToken 已使用约 25 天，建议在失效前重新扫码" : ""}"><span class="status-dot"></span>${status}</span>`}
+                : `<span class="account-status ${cls}" title="${account.status === "session_only" ? "授权已拒绝，原会话可尝试使用，不代表保活恢复" : escapeHTML(statusTooltip)}"><span class="status-dot"></span>${status}</span>`}
               <span class="scan-channel-badge" title="扫码渠道：${scanChannelName(account.scan_product)}" aria-label="${scanChannelName(account.scan_product)} 渠道"><img alt="" src="/static/images/scan-${scanChannelBadge(account.scan_product)}.png?v=095"></span>
               </span>
             </span>
-            <span class="account-meta" title="最后检查 ${formatChecked(account.last_checked_at)}">ID ${escapeHTML(number)} · ${escapeHTML(proxy)}${!isExpired && state.proxyConfigs.get(String(account.id))?.keepalive_supported === false ? " · 不可保活" : ""}</span>
+            <span class="account-meta" title="${isExpired && expiredFull ? `确诊失效时间 ${escapeHTML(expiredFull)}` : `最后检查 ${formatChecked(account.last_checked_at)}`}">ID ${escapeHTML(number)} · ${escapeHTML(proxy)}${!isExpired && state.proxyConfigs.get(String(account.id))?.keepalive_supported === false ? " · 不可保活" : ""}</span>
             <span class="account-openid" title="OpenID: ${escapeHTML(account.openid)}">OpenID: ${escapeHTML(account.openid)}</span>
           </span>
           ${lifecycleMarkup(account)}
-          <span class="account-row-actions"><button type="button" class="btn secondary" data-update-account aria-label="更新 ${escapeHTML(name)} 的扫码">更新</button><a class="btn secondary" href="${FleetUI.scanHref(account)}" aria-label="给 ${escapeHTML(name)} 扫更多渠道">多渠道扫码</a><a class="btn secondary" href="/proxies?ref=${encodeURIComponent(account.id)}" aria-label="管理 ${escapeHTML(name)} 的代理">代理</a></span>
+          <span class="account-row-actions"><button type="button" class="btn secondary" data-refresh-account aria-label="刷新 ${escapeHTML(name)} 的凭据" ${isExpired ? "disabled title='已失效账号需重新扫码'" : "title='使用长效凭据刷新短效凭据'"}>刷新</button><button type="button" class="btn secondary" data-update-account aria-label="更新 ${escapeHTML(name)} 的扫码">更新</button><a class="btn secondary" href="${FleetUI.scanHref(account)}" aria-label="给 ${escapeHTML(name)} 扫更多渠道">多渠道扫码</a><a class="btn secondary" href="/proxies?ref=${encodeURIComponent(account.id)}" aria-label="管理 ${escapeHTML(name)} 的代理">代理</a></span>
           ${pendingConfirmation ? `<div class="account-confirm-actions" id="confirm-account-${account.id}" hidden><span>确认账号状态</span><button type="button" class="btn small" data-confirm-status="alive">仍有效</button><button type="button" class="btn small danger" data-confirm-status="expired">已失效</button></div>` : ""}
         `;
         button.querySelector("img").addEventListener("error", event => {
@@ -1711,6 +1793,31 @@
           event.stopPropagation();
           button.click();
           openAccountLinkDialog("update");
+        });
+        button.querySelector("[data-refresh-account]")?.addEventListener("click", async event => {
+          event.stopPropagation();
+          const btn = event.currentTarget;
+          btn.disabled = true;
+          btn.textContent = "刷新中";
+          try {
+            const result = await api("POST", "/accounts/refresh", { ref: String(account.id), force: true });
+            if (result.refresh_error) {
+              setResult(result, `账号 ID ${account.id}（${name}）刷新失败`, true);
+              setActivity(`❌ 账号 ${name} 刷新失败：${result.refresh_error}`);
+            } else {
+              const expireStr = result.credential_expires_at ? new Date(result.credential_expires_at * 1000).toLocaleTimeString() : "";
+              const mins = result.credential_expires_in ? Math.round(result.credential_expires_in / 60) : 120;
+              setResult(result, `账号 ID ${account.id}（${name}）短效凭据刷新成功`, false);
+              setActivity(`✅ 账号 ${name} 短效凭据刷新成功 · 有效期约 ${mins} 分钟${expireStr ? `（至 ${expireStr}）` : ""}`);
+            }
+            await loadAccounts({ silent: true, skipActivity: true, highlightOpenID: account.openid });
+          } catch (error) {
+            setResult(error.data || error.message, `账号 ID ${account.id} 刷新凭据失败`, true);
+            setActivity(`❌ 账号 ${name} 刷新凭据失败：${error.message}`);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "刷新";
+          }
         });
         button.querySelectorAll(".account-row-actions a").forEach(link => link.addEventListener("click", event => event.stopPropagation()));
         button.querySelector(".account-status-toggle")?.addEventListener("click", event => {
@@ -1743,7 +1850,7 @@
         const config = await api("GET", `/accounts/proxy?ref=${encodeURIComponent(account.id)}`);
         if (state.selectedOpenID !== openid) return;
 		state.proxyConfigs.set(String(account.id), config);
-		const prefix = account.status === "expired" ? "账号需重扫，配置已保留 · " : "";
+		const prefix = account.status === "expired" ? (account.expired_at ? `账号于 ${formatChecked(account.expired_at)} 失效需重扫 · ` : "账号需重扫，配置已保留 · ") : "";
 		$("accountProxyStatus").textContent = `${prefix}${proxyText(config)}${config.configured ? ` · ${config.proxy_type === "socks5" ? "SOCKS5" : "HTTP CONNECT"}` : ""}${config.keepalive_supported === false ? " · 短效代理，不可用于保活" : ""}`;
       } catch (error) {
         if (state.selectedOpenID === openid) $("accountProxyStatus").textContent = `读取失败：${error.message}`;
@@ -1943,17 +2050,24 @@
       }
     }
 
-    async function loadAccounts({background = false} = {}) {
-      if (!background) {
+    async function loadAccounts(options = {}) {
+      const background = Boolean(options.background);
+      const silent = Boolean(options.silent);
+      if (!silent) {
         parkMobileAccountActions();
         $("accountStrip").innerHTML = `<div class="empty-state">账号加载中</div>`;
       }
       try {
         state.accounts = await api("GET", "/accounts?include_members=1");
-		state.proxyConfigs.clear();
-		await Promise.all(state.accounts.map(async account => {
-		  try { state.proxyConfigs.set(String(account.id), await api("GET", `/accounts/proxy?ref=${encodeURIComponent(account.id)}`)); } catch { /* Selected account reports details. */ }
-		}));
+        state.proxyProfiles.clear();
+        try {
+          const profiles = await api("GET", "/api/proxy-profiles");
+          (profiles || []).forEach(profile => state.proxyProfiles.set(String(profile.id), profile));
+        } catch { /* Account rows fall back to 代理配置 #id labels. */ }
+        state.proxyConfigs.clear();
+        await Promise.all(state.accounts.map(async account => {
+          try { state.proxyConfigs.set(String(account.id), await api("GET", `/accounts/proxy?ref=${encodeURIComponent(account.id)}`)); } catch { /* Selected account reports details. */ }
+        }));
         const requestedRef = new URLSearchParams(location.search).get("ref");
         const requestedAccount = requestedRef
           ? state.accounts.find(account => String(account.id) === requestedRef || account.openid === requestedRef)
@@ -1961,7 +2075,16 @@
         if (requestedAccount) state.selectedOpenID = requestedAccount.openid;
         renderAccounts();
         await loadAccountProxySummary();
-        setActivity("账号列表已加载");
+        if (options.highlightOpenID) {
+          const card = document.querySelector(`.account-card[data-openid="${options.highlightOpenID}"]`);
+          if (card) {
+            card.classList.add("refreshed-success");
+            setTimeout(() => card.classList.remove("refreshed-success"), 1800);
+          }
+        }
+        if (!options.skipActivity) {
+          setActivity("账号列表已加载");
+        }
       } catch (error) {
         if (!background) {
           parkMobileAccountActions();
@@ -2101,6 +2224,35 @@
         button.disabled = false;
       }
     }
+    async function refreshCurrentAccount() {
+      const account = getSelectedAccount();
+      if (!account) return;
+      const name = accountName(account);
+      const button = $("refreshAccountBtn");
+      const mobileBtn = $("mobileRefreshAccountBtn");
+      if (button) { button.disabled = true; button.textContent = "刷新中"; }
+      if (mobileBtn) { mobileBtn.disabled = true; mobileBtn.textContent = "刷新中"; }
+      try {
+        const result = await api("POST", "/accounts/refresh", { ref: String(account.id), force: true });
+        if (result.refresh_error) {
+          setResult(result, `账号 ID ${account.id}（${name}）刷新失败`, true);
+          setActivity(`❌ 账号 ${name} 刷新失败：${result.refresh_error}`);
+        } else {
+          const expireStr = result.credential_expires_at ? new Date(result.credential_expires_at * 1000).toLocaleTimeString() : "";
+          const mins = result.credential_expires_in ? Math.round(result.credential_expires_in / 60) : 120;
+          setResult(result, `账号 ID ${account.id}（${name}）短效凭据刷新成功`, false);
+          setActivity(`✅ 账号 ${name} 短效凭据刷新成功 · 有效期约 ${mins} 分钟${expireStr ? `（至 ${expireStr}）` : ""}`);
+        }
+        await loadAccounts({ silent: true, skipActivity: true, highlightOpenID: account.openid });
+      } catch (error) {
+        setResult(error.data || error.message, `账号 ID ${account.id} 刷新凭据失败`, true);
+        setActivity(`❌ 账号 ${name} 刷新凭据失败：${error.message}`);
+      } finally {
+        if (button) { button.disabled = false; button.textContent = "刷新凭据"; }
+        if (mobileBtn) { mobileBtn.disabled = false; mobileBtn.textContent = "刷新凭据"; }
+      }
+    }
+
 
     async function syncQingLong() {
       const account = getSelectedAccount();
@@ -2372,7 +2524,8 @@
       try {
         const result = await api("POST", "/accounts/refresh");
         setResult(result, "存活刷新完成", false);
-        await loadAccounts({background:true});
+        setActivity(`全部账号存活刷新完成（共 ${result.length} 个账号）`);
+        await loadAccounts({ background: true, silent: true, skipActivity: true });
       } catch (error) {
         setResult(error.data || error.message, "存活刷新失败", true);
       } finally {
@@ -2388,7 +2541,8 @@
       try {
         const result = await api("POST", "/accounts/resync");
         setResult(result, "资料同步完成", false);
-        await loadAccounts({background:true});
+        setActivity("全部账号资料同步完成");
+        await loadAccounts({ background: true, silent: true, skipActivity: true });
       } catch (error) {
         setResult(error.data || error.message, "资料同步失败", true);
       } finally {
@@ -2456,6 +2610,8 @@
     $("resyncAllBtn").addEventListener("click", resyncAll);
     $("syncAllQingLongBtn").addEventListener("click", syncAllQingLong);
     $("saveRemarkBtn").addEventListener("click", saveRemark);
+    $("refreshAccountBtn").addEventListener("click", refreshCurrentAccount);
+    $("mobileRefreshAccountBtn").addEventListener("click", refreshCurrentAccount);
     $("syncQingLongBtn").addEventListener("click", syncQingLong);
     $("mobileSyncAccountBtn").addEventListener("click", syncQingLong);
     $("mobileUpdateAccountBtn").addEventListener("click", () => openAccountLinkDialog("update"));

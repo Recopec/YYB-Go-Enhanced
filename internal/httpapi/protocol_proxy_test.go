@@ -135,12 +135,13 @@ func TestSplitProxyKeepsCredentialRefreshOnAccountProxy(t *testing.T) {
 	}
 }
 
-func TestProtocolDefaultUsesAccountProxy(t *testing.T) {
+func TestProtocolAccountPolicyUsesAccountProxy(t *testing.T) {
 	app := newKeepAliveTestApp(t)
 	defer app.Close()
 	acc := insertKeepAliveTestAccount(t, app, "default-proxy", time.Now().Add(time.Hour))
 	const route = "socks5://127.0.0.1:1080"
-	if _, err := app.db.UpsertAccountProxySetting(context.Background(), acc.ID, "static", "socks5", route, "", nil, "", "", "", 300, nil); err != nil {
+	policy := store.ProtocolProxyModeAccount
+	if _, err := app.db.UpsertAccountProxySetting(context.Background(), acc.ID, "static", "socks5", route, "", nil, "", "", "", 300, &policy); err != nil {
 		t.Fatal(err)
 	}
 	_, err := app.invokeWXApp(context.Background(), acc, "wx-test", nil, func(_ context.Context, _ *store.WechatAccount, _ string, _ map[string]any, proxy string, fallback bool) (map[string]any, error) {

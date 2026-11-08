@@ -70,3 +70,29 @@ func TestStandaloneWebAssetsUseVersionedDirectory(t *testing.T) {
 		t.Fatalf("runtime database directory moved: %v", err)
 	}
 }
+
+// A local rebuild can keep the same version number. The derived versioned cache
+// must then refresh files whose embedded content changed instead of serving the
+// previous build's console forever.
+func TestStandaloneWebAssetsRefreshSameVersion(t *testing.T) {
+	root := t.TempDir()
+	res, err := ensureResourcesVersion(root, true, "99.3.1")
+	if err != nil {
+		t.Fatalf("restore assets: %v", err)
+	}
+	target := filepath.Join(res.Templates, "proxies.html")
+	if err := os.WriteFile(target, []byte("直连（默认）"), 0o644); err != nil {
+		t.Fatalf("seed stale template: %v", err)
+	}
+	again, err := ensureResourcesVersion(root, true, "99.3.1")
+	if err != nil {
+		t.Fatalf("refresh assets: %v", err)
+	}
+	page, err := os.ReadFile(filepath.Join(again.Templates, "proxies.html"))
+	if err != nil {
+		t.Fatalf("read refreshed template: %v", err)
+	}
+	if !bytes.Contains(page, []byte("protocolProxyMode")) {
+		t.Fatalf("same-version cache kept the stale template: %q", page)
+	}
+}

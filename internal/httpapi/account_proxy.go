@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -74,10 +76,13 @@ type qrLoginSession struct {
 type accountProxyLease struct {
 	Value            string
 	SettingUpdatedAt int64
-	ExpiresAt        time.Time
+	LastVerifiedAt   time.Time
 }
 
-const accountProxyLeaseTTL = 45 * time.Second
+const (
+	proxyProbeInterval = 15 * time.Second
+	proxyProbeTimeout  = 3 * time.Second
+)
 
 func (body accountProxyIn) spec() proxysource.Spec {
 	return proxysource.Spec{Mode: body.Mode, ProxyType: body.ProxyType, StaticProxy: body.StaticProxy, APIURL: body.APIURL}
@@ -217,6 +222,20 @@ func (a *App) handleAccountProxyTest(w http.ResponseWriter, r *http.Request) {
 			result["exit_region"] = probe.Region
 			result["exit_city"] = probe.City
 		}
+		// An extractable exit is not necessarily able to carry WeChat LongLink.
+		// Probe the real MMTLS handshake so a TLS-shape-filtering exit surfaces
+		// here instead of failing later on every wx.login call.
+		ll := protocol.ProbeLongLink(r.Context(), resolved, 8*time.Second)
+		result["longlink_ok"] = ll.OK
+		result["longlink_stage"] = string(ll.Stage)
+		result["longlink_target"] = ll.Target
+		result["longlink_elapsed_ms"] = ll.ElapsedMS
+		if ll.Err != "" {
+			result["longlink_error"] = ll.Err
+		}
+		if !ll.OK {
+			result["longlink_hint"] = "该出口无法完成微信 LongLink（MMTLS）握手，代理提取正常但微信调用会失败；请更换出口或改用直连/静态代理"
+		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -228,33 +247,122 @@ type proxyExitProbe struct {
 	City    string `json:"city"`
 }
 
+var (
+	ipipTextIPRE  = regexp.MustCompile(`当前\s*IP[：:]\s*([0-9a-fA-F.:]+)`)
+	ipipTextLocRE = regexp.MustCompile(`来自于[：:]\s*(.+)`)
+)
+
+func parseIPIPOutput(text string) (proxyExitProbe, error) {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "{") {
+		var jsonResp struct {
+			Ret  string `json:"ret"`
+			Data struct {
+				IP       string   `json:"ip"`
+				Location []string `json:"location"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(text), &jsonResp); err == nil && jsonResp.Data.IP != "" {
+			var country, region, city string
+			loc := jsonResp.Data.Location
+			if len(loc) > 0 {
+				country = loc[0]
+			}
+			if len(loc) > 1 {
+				region = loc[1]
+			}
+			if len(loc) > 2 {
+				city = loc[2]
+			}
+			if city == "" && isMunicipality(region) {
+				city = region
+			}
+			return proxyExitProbe{
+				IP:      jsonResp.Data.IP,
+				Country: country,
+				Region:  region,
+				City:    city,
+			}, nil
+		}
+	}
+
+	ipMatch := ipipTextIPRE.FindStringSubmatch(text)
+	if len(ipMatch) < 2 {
+		return proxyExitProbe{}, fmt.Errorf("myip.ipip.net output missing IP: %s", text)
+	}
+	ip := strings.TrimSpace(ipMatch[1])
+
+	var country, region, city string
+	locMatch := ipipTextLocRE.FindStringSubmatch(text)
+	if len(locMatch) >= 2 {
+		parts := strings.Fields(locMatch[1])
+		if len(parts) >= 1 {
+			country = parts[0]
+		}
+		if len(parts) >= 2 {
+			region = parts[1]
+		}
+		if isMunicipality(region) {
+			city = region
+		} else if len(parts) >= 3 {
+			city = parts[2]
+		}
+	}
+	return proxyExitProbe{
+		IP:      ip,
+		Country: country,
+		Region:  region,
+		City:    city,
+	}, nil
+}
+
+func isMunicipality(region string) bool {
+	switch region {
+	case "北京", "上海", "天津", "重庆", "北京市", "上海市", "天津市", "重庆市":
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) probeProxyExit(ctx context.Context, proxyValue string) (proxyExitProbe, error) {
 	transport, err := protocol.NewHTTPTransport(proxyValue, false)
 	if err != nil {
 		return proxyExitProbe{}, err
 	}
 	client := &http.Client{Timeout: a.cfg.RequestTimeout, Transport: transport}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ip.sb/geoip", nil)
-	if err != nil {
-		return proxyExitProbe{}, err
+	endpoints := []string{"https://myip.ipip.net", "http://myip.ipip.net"}
+	var lastErr error
+	for _, ep := range endpoints {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		req.Header.Set("User-Agent", "curl/7.88.1")
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			lastErr = doErr
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("myip.ipip.net returned HTTP %d", resp.StatusCode)
+			continue
+		}
+		probe, parseErr := parseIPIPOutput(string(body))
+		if parseErr != nil {
+			lastErr = parseErr
+			continue
+		}
+		return probe, nil
 	}
-	req.Header.Set("User-Agent", "YYB-Go proxy check")
-	resp, err := client.Do(req)
-	if err != nil {
-		return proxyExitProbe{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return proxyExitProbe{}, fmt.Errorf("exit probe returned HTTP %d", resp.StatusCode)
-	}
-	var result proxyExitProbe
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
-		return proxyExitProbe{}, err
-	}
-	if strings.TrimSpace(result.IP) == "" {
-		return proxyExitProbe{}, fmt.Errorf("exit probe returned no IP")
-	}
-	return result, nil
+	return proxyExitProbe{}, lastErr
 }
 
 func (a *App) resolveProxySpec(ctx context.Context, spec proxysource.Spec) (string, error) {
@@ -268,10 +376,15 @@ func (a *App) resolveProxySpec(ctx context.Context, spec proxysource.Spec) (stri
 // QR login, profile queries and credential refresh keep using resolveAccountProxy.
 func (a *App) resolveWXAppProxy(ctx context.Context, accountID int64) (string, bool, error) {
 	setting, err := a.db.GetAccountProxySetting(ctx, accountID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
+		// Accounts without a saved policy follow the account connection, which is
+		// also the insert default for new accounts.
+		return a.resolveAccountProxy(ctx, accountID)
+	}
+	if err != nil {
 		return "", false, err
 	}
-	if err == nil && setting.ProtocolProxyMode == "direct" {
+	if setting.ProtocolProxyMode == store.ProtocolProxyModeDirect {
 		return "", false, nil
 	}
 	return a.resolveAccountProxy(ctx, accountID)
@@ -308,16 +421,41 @@ func (a *App) resolveAccountProxy(ctx context.Context, accountID int64) (string,
 	}
 	defer func() { <-leaseLock }()
 	a.proxyMu.Lock()
-	if lease, ok := a.proxyLeases[accountID]; ok && lease.SettingUpdatedAt == setting.UpdatedAt && time.Now().Before(lease.ExpiresAt) {
-		a.proxyMu.Unlock()
-		return lease.Value, false, nil
-	}
+	lease, hasLease := a.proxyLeases[accountID]
 	a.proxyMu.Unlock()
+
+	if hasLease && lease.SettingUpdatedAt == setting.UpdatedAt && lease.Value != "" {
+		if time.Since(lease.LastVerifiedAt) < proxyProbeInterval {
+			return lease.Value, false, nil
+		}
+
+		probeCtx, cancelProbe := context.WithTimeout(ctx, proxyProbeTimeout)
+		probe, probeErr := a.probeProxyExit(probeCtx, lease.Value)
+		cancelProbe()
+
+		if probeErr == nil && probe.IP != "" {
+			a.proxyMu.Lock()
+			lease.LastVerifiedAt = time.Now()
+			a.proxyLeases[accountID] = lease
+			a.proxyMu.Unlock()
+			return lease.Value, false, nil
+		}
+
+		log.Printf("[proxy] 账号 %d 缓存代理已失效 (probeErr=%v)，即将重新提取", accountID, probeErr)
+		a.proxyMu.Lock()
+		delete(a.proxyLeases, accountID)
+		a.proxyMu.Unlock()
+	}
+
 	proxyValue, err := a.resolveProxySpec(ctx, spec)
 	a.proxyMu.Lock()
 	defer a.proxyMu.Unlock()
 	if err == nil && proxyValue != "" {
-		a.proxyLeases[accountID] = accountProxyLease{Value: proxyValue, SettingUpdatedAt: setting.UpdatedAt, ExpiresAt: time.Now().Add(accountProxyLeaseTTL)}
+		a.proxyLeases[accountID] = accountProxyLease{
+			Value:            proxyValue,
+			SettingUpdatedAt: setting.UpdatedAt,
+			LastVerifiedAt:   time.Now(),
+		}
 	} else {
 		delete(a.proxyLeases, accountID)
 	}

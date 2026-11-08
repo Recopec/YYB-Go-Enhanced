@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -44,13 +45,18 @@ func ensureResourcesVersion(root string, preferEmbedded bool, buildVersion strin
 			return res, err
 		}
 	}
-	if err := restoreEmbeddedWebAssets(webRoot); err != nil {
+	if err := restoreEmbeddedWebAssets(webRoot, preferEmbedded); err != nil {
 		return res, err
 	}
 	return res, nil
 }
 
-func restoreEmbeddedWebAssets(root string) error {
+// restoreEmbeddedWebAssets copies embedded templates/static into root. A plain
+// resource directory belongs to the operator once restored, so existing files
+// stay untouched. The versioned .web-assets cache is derived, so a local build
+// that reuses the same version must refresh files whose embedded content
+// changed; otherwise the console keeps serving the previous templates.
+func restoreEmbeddedWebAssets(root string, refresh bool) error {
 	return fs.WalkDir(embeddedresource.WebAssets, ".", func(assetPath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -63,8 +69,19 @@ func restoreEmbeddedWebAssets(root string) error {
 		if entry.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		if _, err := os.Stat(target); err == nil {
-			return nil
+
+		if existing, err := os.ReadFile(target); err == nil {
+			if !refresh {
+				return nil
+			}
+			content, err := fs.ReadFile(embeddedresource.WebAssets, assetPath)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(existing, content) {
+				return nil
+			}
+			return os.WriteFile(target, content, 0o644)
 		} else if !os.IsNotExist(err) {
 			return err
 		}
