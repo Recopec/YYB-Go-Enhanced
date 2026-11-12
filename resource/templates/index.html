@@ -520,18 +520,23 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
+      flex-wrap: wrap;
+      gap: 6px 8px;
     }
 
-    .account-header-tools { display:flex;align-items:center;gap:7px;flex-shrink:0; }
+    .account-header-tools { display:flex;align-items:center;gap:7px;flex-shrink:0;margin-left:auto; }
     .scan-channel-badge { display:inline-flex;align-items:center;justify-content:center;width:23px;height:23px;border:1px solid var(--border,#d9e3e5);border-radius:7px;background:#fff; }
     .scan-channel-badge img { width:17px;height:17px;object-fit:contain; }
 
     .account-name {
+      flex: 1 1 100%;
       min-width: 0;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
       overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
       font-weight: 760;
     }
     .account-select { border:0; padding:0; background:transparent; color:inherit; font:inherit; font-size:14px; font-weight:650; text-align:left; cursor:pointer; }
@@ -590,6 +595,30 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    .view-toggle { display:inline-flex; gap:6px; }
+    .view-toggle .btn[aria-pressed="true"] { background:var(--platform-accent); border-color:var(--platform-accent); color:#fff; }
+    .owner-chip { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; background:var(--surface); color:var(--muted); font-size:12px; white-space:nowrap; }
+    .owner-chip.unowned { background:transparent; border:1px dashed var(--line); color:var(--faint); }
+    .owner-chip.editable { cursor:pointer; }
+    .owner-chip.editable:hover { text-decoration:underline; }
+    .owner-chip.editable:focus-visible { outline:2px solid currentColor; outline-offset:1px; }
+    .account-owner-line { display:flex; margin-top:2px; }
+    .account-table-wrap { padding:0 12px 12px; overflow-x:auto; }
+    .account-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+    .account-table th, .account-table td { padding:7px 7px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
+    .account-table thead th { position:sticky; top:0; z-index:1; background:var(--surface); color:var(--muted); font-size:12px; font-weight:600; white-space:nowrap; }
+    .account-table thead button { border:0; padding:0; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+    .account-table tbody tr { cursor:pointer; }
+    .account-table tbody tr:hover { background:var(--surface); }
+    .account-table tbody tr.selected { background:#fbeef2; }
+    .account-table .cell-id { width:56px; white-space:nowrap; color:var(--muted); }
+    .account-table .cell-name { min-width:180px; max-width:320px; }
+    .account-table .cell-name button { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; border:0; padding:0; background:transparent; color:inherit; font:inherit; font-weight:650; text-align:left; cursor:pointer; }
+    .account-table .cell-name small { display:block; margin-top:2px; color:var(--muted); font-size:11px; }
+    .account-table .cell-lifecycle { white-space:nowrap; color:var(--muted); font-size:11.5px; }
+    .account-table .cell-actions .row-actions { display:flex; gap:5px; }
+    .account-table .cell-actions .btn { min-height:26px; padding:3px 6px; font-size:11.5px; }
 
     .empty-state {
       grid-column: 1 / -1;
@@ -1089,10 +1118,33 @@
         <div class="account-filters">
           <label class="account-search"><span class="sr-only">搜索账号</span><input class="input" id="accountSearch" type="search" placeholder="搜索昵称、备注、ID 或 OpenID" autocomplete="off"></label>
           <label><span class="sr-only">账号状态</span><select class="input" id="accountStatusFilter"><option value="all">全部状态</option><option value="alive">可用</option><option value="pending">待确认</option><option value="expired">已失效</option></select></label>
-          <details class="account-maintenance"><summary>账号整理</summary><div class="inline-actions"><button class="btn secondary" id="repairAccountsBtn" type="button" title="清理未完成扫码残留并释放空缺 ID">清理扫码残留</button><button class="btn secondary" id="compactAccountsBtn" type="button" title="迁移现有账号到连续 ID，不删除账号">压缩账号 ID</button></div></details>
+          <label id="accountOwnerFilterWrap" hidden><span class="sr-only">归属用户</span><select class="input" id="accountOwnerFilter"><option value="all">全部归属</option><option value="none">未归属</option></select></label>
+          <div class="view-toggle" role="group" aria-label="账号视图">
+            <button class="btn secondary" id="cardViewBtn" type="button" aria-pressed="true">卡片</button>
+            <button class="btn secondary" id="tableViewBtn" type="button" aria-pressed="false">表格</button>
+          </div>
+          <details class="account-maintenance"><summary>账号整理</summary><div class="inline-actions"><button class="btn secondary" id="repairAccountsBtn" type="button" title="清理未完成扫码残留，不重排 ID">清理扫码残留</button><button class="btn secondary" id="compactAccountsBtn" type="button" title="迁移现有账号到连续 ID，不删除账号">压缩账号 ID</button></div></details>
         </div>
         <div class="account-strip" id="accountStrip">
           <div class="empty-state">账号加载中</div>
+        </div>
+        <div class="account-table-wrap" id="accountTableWrap" hidden>
+          <table class="account-table">
+            <thead>
+              <tr>
+                <th><button type="button" data-sort="id">ID</button></th>
+                <th><button type="button" data-sort="name">备注</button></th>
+                <th id="accountOwnerCol" hidden><button type="button" data-sort="owner">归属</button></th>
+                <th><button type="button" data-sort="status">状态</button></th>
+                <th>渠道</th>
+                <th>代理</th>
+                <th>有效期</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="accountTableBody"></tbody>
+          </table>
+          <div class="empty-state" id="accountTableEmpty" hidden>没有匹配的账号。</div>
         </div>
         <div class="mobile-account-actions" id="mobileAccountActions" hidden role="region" aria-labelledby="mobileAccountName">
           <strong id="mobileAccountName">当前账号</strong>
@@ -1289,6 +1341,14 @@
       <div class="inline-actions" style="margin-top:16px"><button class="btn secondary" id="mergeChannelsCancelBtn" type="button">取消</button><button class="btn primary" id="mergeChannelsConfirmBtn" type="button">合并</button></div>
     </div>
   </dialog>
+  <dialog class="link-dialog" id="ownerDialog" aria-labelledby="ownerDialogTitle">
+    <div class="link-dialog-body">
+      <div class="link-dialog-head"><div><h2 id="ownerDialogTitle">修改账号归属</h2><p id="ownerDialogNote">归属决定谁能在这个控制台看到这个账号；改完后原归属用户不再看到它，脚本和面板里的 ID 不变。</p></div><button class="link-dialog-close" id="ownerDialogClose" type="button" aria-label="关闭修改归属">×</button></div>
+      <div class="field"><label for="ownerDialogUser">归属用户</label><select class="input" id="ownerDialogUser"></select></div>
+      <p class="link-dialog-footnote" id="ownerDialogAccount"></p>
+      <div class="inline-actions" style="margin-top:16px"><button class="btn secondary" id="ownerDialogCancel" type="button">取消</button><button class="btn primary" id="ownerDialogSave" type="button">保存</button></div>
+    </div>
+  </dialog>
   <dialog class="link-dialog" id="mergeAccountDialog" aria-labelledby="mergeAccountTitle">
     <div class="link-dialog-body">
       <div class="link-dialog-head"><div><h2 id="mergeAccountTitle">合并误新增账号</h2><p>将误新增账号的授权移入原 ID，不按昵称自动判断身份。</p></div><button class="link-dialog-close" id="mergeAccountClose" type="button" aria-label="关闭合并">×</button></div>
@@ -1365,6 +1425,11 @@
       ],
       proxyConfigs: new Map(),
       proxyProfiles: new Map(),
+      owners: new Map(),
+      ownersAvailable: false,
+      isAdmin: false,
+      accountView: "cards",
+      accountSort: { key: "id", dir: 1 },
       selectedOpenID: "",
       lastResult: "",
       // Ids that were already expired at the last render. It stays null until the
@@ -1469,19 +1534,153 @@
       try {
         const session = await api("GET", "/api/auth/me");
         const isAdmin = session?.auth_enabled === false || session?.user?.role === "admin";
+        state.isAdmin = isAdmin;
         $("currentRoleText").textContent = isAdmin ? "管理员" : "普通用户";
         ["usersNav", "syncAllQingLongBtn", "repairAccountsBtn", "compactAccountsBtn"].forEach(id => {
           const element = $(id);
           if (element) element.hidden = !isAdmin;
         });
+        $("accountOwnerFilterWrap").hidden = !ownerVisible();
+        $("accountOwnerCol").hidden = !ownerVisible();
         $("qingLongSettings").hidden = !isAdmin;
 		$("accountCircuitGlobalLink").hidden = !isAdmin;
         document.querySelector(".account-maintenance").hidden = !isAdmin;
         $("panelAdminNote").hidden = isAdmin;
+        if (state.accounts.length) renderAccounts();
       } catch {
         $("currentRoleText").textContent = "未知";
       }
     }
+
+    let roleReady = null;
+    function ensureRole() {
+      roleReady ??= applyRoleVisibility();
+      return roleReady;
+    }
+
+    function ownerVisible() {
+      return state.isAdmin && state.ownersAvailable;
+    }
+
+    function ownerOf(account) {
+      return state.owners.get(String(account?.id)) || null;
+    }
+
+    function ownerLabel(account) {
+      const owner = ownerOf(account);
+      return owner ? (owner.display_name || owner.username) : "未归属";
+    }
+
+    function ownerKey(account) {
+      const owner = ownerOf(account);
+      return owner ? String(owner.user_id) : "none";
+    }
+
+    async function loadAccountOwners() {
+      state.owners.clear();
+      state.ownersAvailable = false;
+      if (state.isAdmin) {
+        try {
+          const result = await api("GET", "/api/accounts/owners");
+          (result?.owners || []).forEach(row => state.owners.set(String(row.account_id), row));
+          state.ownersAvailable = true;
+        } catch { /* An older server without the endpoint: keep ownership hidden instead of showing every account as unowned. */ }
+      }
+      $("accountOwnerFilterWrap").hidden = !ownerVisible();
+      $("accountOwnerCol").hidden = !ownerVisible();
+      renderOwnerFilter();
+    }
+
+    function renderOwnerFilter() {
+      const select = $("accountOwnerFilter");
+      if (!select) return;
+      const current = select.value || "all";
+      const counts = new Map();
+      state.owners.forEach(row => counts.set(String(row.user_id), (counts.get(String(row.user_id)) || 0) + 1));
+      const users = [...state.owners.values()]
+        .filter((row, index, all) => all.findIndex(item => item.user_id === row.user_id) === index)
+        .sort((a, b) => String(a.display_name || a.username).localeCompare(String(b.display_name || b.username), "zh-Hans-CN"));
+      select.innerHTML = `<option value="all">全部归属</option><option value="none">未归属</option>` + users.map(user =>
+        `<option value="${user.user_id}">${escapeHTML(user.display_name || user.username)}（${counts.get(String(user.user_id)) || 0}）</option>`).join("");
+      select.value = [...select.options].some(option => option.value === current) ? current : "all";
+    }
+
+    // 归属 chip：管理员点一下就能把这个账号交给另一个控制台用户。多渠道账号的
+    // 归属跟着主账号走，成员要先移出或拆分，所以那些 chip 只显示、不可点。
+    function ownerChipMarkup(account) {
+      const label = `归属 ${ownerLabel(account)}`;
+      if (account.fleet_primary_id) {
+        return `<span class="owner-chip${ownerOf(account) ? "" : " unowned"}" title="多渠道账号的归属随主账号；成员要先移出或拆分才能单独改">${escapeHTML(label)}</span>`;
+      }
+      return `<span class="owner-chip${ownerOf(account) ? "" : " unowned"} editable" role="button" tabindex="0" data-owner-edit="${account.id}" title="点击修改归属（管理员）">${escapeHTML(label)}</span>`;
+    }
+
+    let ownerDialogAccountId = 0;
+
+    async function openOwnerDialog(accountId) {
+      const account = state.accounts.find(item => item.id === accountId);
+      if (!account || account.fleet_primary_id) return;
+      ownerDialogAccountId = account.id;
+      $("ownerDialogAccount").textContent = `ID ${account.id} · ${accountName(account)} · 当前归属 ${ownerLabel(account)}`;
+      $("ownerDialogNote").textContent = "归属决定谁能在这个控制台看到这个账号；改完后原归属用户不再看到它，脚本和面板里的 ID 不变。";
+      const select = $("ownerDialogUser");
+      select.innerHTML = `<option value="">读取用户…</option>`;
+      select.disabled = true;
+      $("ownerDialogSave").disabled = true;
+      $("ownerDialog").showModal();
+      try {
+        const users = (await api("GET", "/api/auth/users")).filter(user => user.enabled);
+        select.innerHTML = users.map(user =>
+          `<option value="${user.id}">${escapeHTML(user.display_name || user.username)}（${escapeHTML(user.username)}）${user.account_count ? ` · ${user.account_count} 个账号` : ""}</option>`).join("");
+        const current = ownerOf(account);
+        if (current) select.value = String(current.user_id);
+        select.disabled = !users.length;
+        $("ownerDialogSave").disabled = !users.length;
+      } catch (error) {
+        select.innerHTML = `<option value="">读取用户失败</option>`;
+        $("ownerDialogNote").textContent = `读取用户失败：${error.message}`;
+      }
+    }
+
+    async function saveOwnerDialog() {
+      const accountId = ownerDialogAccountId;
+      const userId = Number($("ownerDialogUser").value);
+      if (!accountId || !userId) return;
+      const button = $("ownerDialogSave");
+      button.disabled = true;
+      try {
+        const result = await api("POST", "/api/accounts/owner", { ref: String(accountId), user_id: userId });
+        $("ownerDialog").close();
+        await loadAccounts({ background: true, skipActivity: true });
+        const owner = result?.owner;
+        setActivity(result?.changed
+          ? `ID ${accountId} 已改归 ${owner?.display_name || owner?.username || "用户"}`
+          : `ID ${accountId} 的归属没有变化`);
+      } catch (error) {
+        button.disabled = false;
+        setActivity(`改归属失败：${error.message}`);
+      }
+    }
+
+    $("ownerDialogClose").addEventListener("click", () => $("ownerDialog").close());
+    $("ownerDialogCancel").addEventListener("click", () => $("ownerDialog").close());
+    $("ownerDialogSave").addEventListener("click", saveOwnerDialog);
+    // 账号卡片本身是一个按钮，捕获阶段拦下 chip 的点击，避免顺带选中账号。
+    document.addEventListener("click", event => {
+      const chip = event.target.closest?.("[data-owner-edit]");
+      if (!chip) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openOwnerDialog(Number(chip.dataset.ownerEdit));
+    }, true);
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const chip = event.target.closest?.("[data-owner-edit]");
+      if (!chip) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openOwnerDialog(Number(chip.dataset.ownerEdit));
+    }, true);
 
     function accountName(account) {
       return account.remark || account.nickname || account.alias || account.openid || "未命名账号";
@@ -1649,6 +1848,11 @@
         card.querySelector(".account-select").setAttribute("aria-pressed", String(selected));
         card.querySelectorAll(".fleet-member").forEach(row => row.classList.toggle("selected", row.dataset.openid === state.selectedOpenID));
       });
+      document.querySelectorAll("#accountTableBody tr[data-openid]").forEach(row => {
+        let members = [row.dataset.openid];
+        try { members = JSON.parse(row.dataset.memberOpenids || "null") || members; } catch { /* fall back to the primary */ }
+        row.classList.toggle("selected", members.includes(state.selectedOpenID));
+      });
       placeMobileAccountActions();
       updateFeatureHint();
     }
@@ -1710,22 +1914,147 @@
       }
     }
 
+    function lifecycleText(account) {
+      if (account.status === "expired") return "保活已停止";
+      if (account.status === "session_only") return "仅原会话";
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAt = Number(account.credential_expires_at || 0);
+      const observed = Number(account.refresh_token_observed_at || 0);
+      const alive = expiresAt ? lifecycleDuration(Math.max(0, expiresAt - now)) : "未记录";
+      const rescan = observed ? lifecycleDuration(Math.max(0, 30 * 86400 - (now - observed))) : "未记录";
+      return `保活 ${alive} · 重扫 ${rescan}`;
+    }
+
+    function accountGroupStatus(group) {
+      const account = group.primary;
+      const expired = account.status === "expired";
+      const tone = expired ? "expired" : account.rescan_recommended ? "warning" : account.status === "alive" ? "alive" : "unknown";
+      const text = expired ? "已失效" : account.status === "session_only" ? "需补授权" : account.rescan_recommended ? "建议重扫" : statusText(account.status);
+      return { tone, text };
+    }
+
+    function compareGroups(a, b, key) {
+      if (key === "name") return accountName(a.primary).localeCompare(accountName(b.primary), "zh-Hans-CN");
+      if (key === "owner") {
+        const left = ownerOf(a.primary);
+        const right = ownerOf(b.primary);
+        const leftName = left ? String(left.display_name || left.username) : "";
+        const rightName = right ? String(right.display_name || right.username) : "";
+        if (!leftName !== !rightName) return leftName ? -1 : 1;
+        return leftName.localeCompare(rightName, "zh-Hans-CN");
+      }
+      if (key === "status") {
+        const rank = group => group.primary.status === "expired" ? 0 : group.primary.status === "alive" && !group.primary.rescan_recommended ? 2 : 1;
+        return rank(a) - rank(b);
+      }
+      return a.primary.id - b.primary.id;
+    }
+
+    function renderAccountTable(shown) {
+      const body = $("accountTableBody");
+      if (!body) return;
+      const sort = state.accountSort;
+      const groups = [...shown].sort((a, b) => compareGroups(a, b, sort.key) * sort.dir);
+      body.innerHTML = groups.map(group => {
+        const account = group.primary;
+        const fleet = FleetUI.isFleet(group);
+        const name = accountName(account);
+        const { tone, text } = accountGroupStatus(group);
+        const memberOpenIDs = group.members.map(member => member.openid);
+        const selected = memberOpenIDs.includes(state.selectedOpenID);
+        const ownerCell = ownerVisible() ? `<td data-label="归属">${ownerChipMarkup(account)}</td>` : "";
+        const channels = fleet
+          ? group.members.map(member => escapeHTML(scanChannelName(member.scan_product))).join(" / ")
+          : escapeHTML(scanChannelName(account.scan_product));
+        return `<tr class="${selected ? "selected" : ""}" data-openid="${escapeHTML(account.openid)}" data-member-openids='${escapeHTML(JSON.stringify(memberOpenIDs))}'>
+          <td class="cell-id" data-label="ID">${escapeHTML(account.id)}${fleet ? ` · ${group.members.length} 渠道` : ""}</td>
+          <td class="cell-name" data-label="备注"><button type="button" class="table-select" title="${escapeHTML(name)}">${escapeHTML(name)}</button>${fleet ? `<small>${channels}</small>` : ""}</td>
+          ${ownerCell}
+          <td data-label="状态"><span class="account-status ${tone}"><span class="status-dot"></span>${escapeHTML(text)}</span></td>
+          <td data-label="渠道">${channels}</td>
+          <td data-label="代理">${escapeHTML(proxyText(state.proxyConfigs.get(String(account.id))))}</td>
+          <td class="cell-lifecycle" data-label="有效期">${escapeHTML(lifecycleText(account))}</td>
+          <td class="cell-actions" data-label="操作"><span class="row-actions">
+            <button type="button" class="btn secondary" data-refresh-account ${account.status === "expired" ? "disabled title='已失效账号需重新扫码'" : ""}>刷新</button>
+            <button type="button" class="btn secondary" data-update-account>更新</button>
+            <a class="btn secondary" href="${FleetUI.scanHref(account)}">多渠道</a>
+            <a class="btn secondary" href="/proxies?ref=${encodeURIComponent(account.id)}">代理</a>
+          </span></td>
+        </tr>`;
+      }).join("");
+      $("accountTableEmpty").textContent = "没有匹配的账号。";
+      $("accountTableEmpty").hidden = groups.length > 0;
+    }
+
+    function applyAccountView() {
+      const table = state.accountView === "table";
+      $("accountStrip").hidden = table;
+      $("accountTableWrap").hidden = !table;
+      $("cardViewBtn").setAttribute("aria-pressed", String(!table));
+      $("tableViewBtn").setAttribute("aria-pressed", String(table));
+      const params = new URLSearchParams(location.search);
+      if (table) params.set("view", "table");
+      else params.delete("view");
+      const query = params.toString();
+      history.replaceState(null, "", query ? `/?${query}` : "/");
+    }
+
+    function setAccountView(view) {
+      state.accountView = view === "table" ? "table" : "cards";
+      applyAccountView();
+      renderAccounts();
+    }
+
+    async function refreshAccountCredentials(account, button) {
+      const name = accountName(account);
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "刷新中";
+      try {
+        const result = await api("POST", "/accounts/refresh", { ref: String(account.id), force: true });
+        if (result.refresh_error) {
+          setResult(result, `账号 ID ${account.id}（${name}）刷新失败`, true);
+          setActivity(`❌ 账号 ${name} 刷新失败：${result.refresh_error}`);
+        } else {
+          const expireStr = result.credential_expires_at ? new Date(result.credential_expires_at * 1000).toLocaleTimeString() : "";
+          const mins = result.credential_expires_in ? Math.round(result.credential_expires_in / 60) : 120;
+          setResult(result, `账号 ID ${account.id}（${name}）短效凭据刷新成功`, false);
+          setActivity(`✅ 账号 ${name} 短效凭据刷新成功 · 有效期约 ${mins} 分钟${expireStr ? `（至 ${expireStr}）` : ""}`);
+        }
+        await loadAccounts({ silent: true, skipActivity: true, highlightOpenID: account.openid });
+      } catch (error) {
+        setResult(error.data || error.message, `账号 ID ${account.id} 刷新凭据失败`, true);
+        setActivity(`❌ 账号 ${name} 刷新凭据失败：${error.message}`);
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+
     function renderAccounts() {
       const strip = $("accountStrip");
       parkMobileAccountActions();
       const query = $("accountSearch").value.trim().toLocaleLowerCase();
       const filter = $("accountStatusFilter").value;
+      const ownerFilter = $("accountOwnerFilter").value;
       const visible = state.accounts.filter(account => {
         const status = account.status === "alive" || account.status === "expired" ? account.status : "pending";
-        return (filter === "all" || status === filter) && (!query || [accountName(account), account.nickname, account.remark, account.id, account.openid].some(value => String(value ?? "").toLocaleLowerCase().includes(query)));
+        if (filter !== "all" && status !== filter) return false;
+        if (state.isAdmin && ownerFilter !== "all" && ownerKey(account) !== ownerFilter) return false;
+        return !query || [accountName(account), account.nickname, account.remark, account.id, account.openid, ownerLabel(account)].some(value => String(value ?? "").toLocaleLowerCase().includes(query));
       });
       // Accounts of one fleet share a card, shown whenever one of them matches.
       const matched = new Set(visible.map(account => account.id));
       const shown = FleetUI.groups(state.accounts).filter(group => group.members.some(member => matched.has(member.id)));
       const fleetCount = shown.filter(FleetUI.isFleet).length;
       $("accountFilterCount").textContent = `显示 ${shown.reduce((sum, group) => sum + group.members.length, 0)} / ${state.accounts.length} 个账号${fleetCount ? ` · ${fleetCount} 个多渠道账号` : ""}`;
+      const tableView = state.accountView === "table";
+      strip.hidden = tableView;
+      $("accountTableWrap").hidden = !tableView;
       if (!state.accounts.length) {
         strip.innerHTML = `<div class="empty-state">暂无账号，点击“新增账号”开始扫码。</div>`;
+        renderAccountTable([]);
+        $("accountTableEmpty").textContent = "暂无账号，点击“新增账号”开始扫码。";
         state.selectedOpenID = "";
         renderStats();
         return;
@@ -1733,6 +2062,13 @@
 
       if (!state.accounts.some(item => item.openid === state.selectedOpenID)) {
         state.selectedOpenID = state.accounts[0].openid;
+      }
+
+      if (tableView) {
+        renderAccountTable(shown);
+        state.expiredSeen = new Set(state.accounts.filter(item => item.status === "expired").map(item => item.id));
+        renderStats();
+        return;
       }
 
       strip.innerHTML = "";
@@ -1769,7 +2105,7 @@
           </span>
           <span class="account-main">
             <span class="account-header">
-              <button type="button" class="account-name account-select" aria-pressed="false" aria-label="选择账号 ${escapeHTML(number)}，${escapeHTML(name)}，${status}">${escapeHTML(name)}</button>
+              <button type="button" class="account-name account-select" aria-pressed="false" title="${escapeHTML(name)}" aria-label="选择账号 ${escapeHTML(number)}，${escapeHTML(name)}，${status}">${escapeHTML(name)}</button>
               <span class="account-header-tools">
               ${pendingConfirmation
                 ? `<button type="button" class="account-status account-status-toggle ${cls}" aria-expanded="false" aria-controls="confirm-account-${account.id}" aria-label="确认账号 ${escapeHTML(number)} 的状态"><span class="status-dot"></span>${status}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>`
@@ -1778,6 +2114,7 @@
               </span>
             </span>
             <span class="account-meta" title="${isExpired && expiredFull ? `确诊失效时间 ${escapeHTML(expiredFull)}` : `最后检查 ${formatChecked(account.last_checked_at)}`}">ID ${escapeHTML(number)} · ${escapeHTML(proxy)}${!isExpired && state.proxyConfigs.get(String(account.id))?.keepalive_supported === false ? " · 不可保活" : ""}</span>
+            ${ownerVisible() ? `<span class="account-owner-line">${ownerChipMarkup(account)}</span>` : ""}
             <span class="account-openid" title="OpenID: ${escapeHTML(account.openid)}">OpenID: ${escapeHTML(account.openid)}</span>
           </span>
           ${lifecycleMarkup(account)}
@@ -1796,28 +2133,7 @@
         });
         button.querySelector("[data-refresh-account]")?.addEventListener("click", async event => {
           event.stopPropagation();
-          const btn = event.currentTarget;
-          btn.disabled = true;
-          btn.textContent = "刷新中";
-          try {
-            const result = await api("POST", "/accounts/refresh", { ref: String(account.id), force: true });
-            if (result.refresh_error) {
-              setResult(result, `账号 ID ${account.id}（${name}）刷新失败`, true);
-              setActivity(`❌ 账号 ${name} 刷新失败：${result.refresh_error}`);
-            } else {
-              const expireStr = result.credential_expires_at ? new Date(result.credential_expires_at * 1000).toLocaleTimeString() : "";
-              const mins = result.credential_expires_in ? Math.round(result.credential_expires_in / 60) : 120;
-              setResult(result, `账号 ID ${account.id}（${name}）短效凭据刷新成功`, false);
-              setActivity(`✅ 账号 ${name} 短效凭据刷新成功 · 有效期约 ${mins} 分钟${expireStr ? `（至 ${expireStr}）` : ""}`);
-            }
-            await loadAccounts({ silent: true, skipActivity: true, highlightOpenID: account.openid });
-          } catch (error) {
-            setResult(error.data || error.message, `账号 ID ${account.id} 刷新凭据失败`, true);
-            setActivity(`❌ 账号 ${name} 刷新凭据失败：${error.message}`);
-          } finally {
-            btn.disabled = false;
-            btn.textContent = "刷新";
-          }
+          await refreshAccountCredentials(account, event.currentTarget);
         });
         button.querySelectorAll(".account-row-actions a").forEach(link => link.addEventListener("click", event => event.stopPropagation()));
         button.querySelector(".account-status-toggle")?.addEventListener("click", event => {
@@ -2058,7 +2374,9 @@
         $("accountStrip").innerHTML = `<div class="empty-state">账号加载中</div>`;
       }
       try {
+        await ensureRole();
         state.accounts = await api("GET", "/accounts?include_members=1");
+        await loadAccountOwners();
         state.proxyProfiles.clear();
         try {
           const profiles = await api("GET", "/api/proxy-profiles");
@@ -2109,7 +2427,7 @@
         const confirmed = window.confirm(
           `发现 ${candidates.length} 条未完成扫码残留：${ids}\n\n` +
           `确认清理这些残留记录？\n` +
-          `正常账号、已过期账号和现有账号 ID 不会被重排。释放的 ID 会在下次成功扫码时自动复用。`
+          `正常账号、已过期账号和现有账号 ID 不会被重排。已释放的 ID 不会再分配给新账号。`
         );
         if (!confirmed) {
           setActivity("已取消账号整理");
@@ -2604,6 +2922,29 @@
     $("mergeAccountConfirmBtn").addEventListener("click", () => mergeAccount(true));
     $("accountSearch").addEventListener("input", renderAccounts);
     $("accountStatusFilter").addEventListener("change", renderAccounts);
+    $("accountOwnerFilter").addEventListener("change", renderAccounts);
+    $("cardViewBtn").addEventListener("click", () => setAccountView("cards"));
+    $("tableViewBtn").addEventListener("click", () => setAccountView("table"));
+    document.querySelectorAll(".account-table thead button[data-sort]").forEach(button => {
+      button.addEventListener("click", () => {
+        const key = button.dataset.sort;
+        state.accountSort = state.accountSort.key === key ? { key, dir: -state.accountSort.dir } : { key, dir: 1 };
+        renderAccounts();
+      });
+    });
+    $("accountTableBody").addEventListener("click", async event => {
+      const row = event.target.closest("tr[data-openid]");
+      if (!row) return;
+      if (event.target.closest("a")) return;
+      const account = state.accounts.find(item => item.openid === row.dataset.openid);
+      if (!account) return;
+      if (event.target.closest("[data-refresh-account]")) {
+        await refreshAccountCredentials(account, event.target.closest("[data-refresh-account]"));
+        return;
+      }
+      selectAccount(account);
+      if (event.target.closest("[data-update-account]")) openAccountLinkDialog("update");
+    });
     $("repairAccountsBtn").addEventListener("click", repairAccounts);
     $("compactAccountsBtn").addEventListener("click", compactAccounts);
     $("refreshAllBtn").addEventListener("click", refreshAll);
@@ -2692,7 +3033,9 @@
       }
     });
 
-    applyRoleVisibility();
+    state.accountView = new URLSearchParams(location.search).get("view") === "table" ? "table" : "cards";
+    applyAccountView();
+    ensureRole();
     loadHealth();
     loadFeatures();
     // The channel list is the server's; cards and the update dialog redraw when it differs from the built-in one.

@@ -140,11 +140,12 @@
       </span>
       <span class="account-main">
         <span class="account-header">
-          <button type="button" class="account-name account-select" aria-pressed="false" aria-label="选择多渠道账号 ${primary.id}，${escapeHTML(name)}，${members.length} 个渠道，${sum.text}">${escapeHTML(name)}</button>
+          <button type="button" class="account-name account-select" aria-pressed="false" title="${escapeHTML(name)}" aria-label="选择多渠道账号 ${primary.id}，${escapeHTML(name)}，${members.length} 个渠道，${sum.text}">${escapeHTML(name)}</button>
           <span class="account-header-tools"><span class="account-status ${sum.cls}"><span class="status-dot"></span>${escapeHTML(sum.text)}</span></span>
         </span>
         ${chipsMarkup(group)}
         <span class="account-meta" title="主账号 ID ${primary.id}，成员 ${idList(others)}">ID ${primary.id}（主）· ${idList(others)} · ${escapeHTML(proxy)}</span>
+        ${ownerVisible() ? `<span class="account-owner-line"><span class="owner-chip${ownerOf(primary) ? '' : ' unowned'}">归属 ${escapeHTML(ownerLabel(primary))}</span></span>` : ''}
         ${attention(group)}
         <button type="button" class="fleet-expand" aria-expanded="${expanded}" aria-controls="${panelId}">渠道详情<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
       </span>
@@ -262,6 +263,27 @@
         force.type = 'button';
         force.addEventListener('click', () => mergeSelected([String(result.id)]));
         line.append(' ', force);
+      }
+      // Two real owners: the fleet answers to one user, so the operator can move
+      // this member's claim to the primary's owner instead of editing the database.
+      const primaryAccount = state.accounts.find(item => String(item.id) === String(primary));
+      const primaryOwner = primaryAccount ? ownerOf(primaryAccount) : null;
+      if (!result.bound && primaryOwner && /归属不同/.test(result.error || '')) {
+        const ownerName = primaryOwner.display_name || primaryOwner.username;
+        const move = node('button', 'btn secondary', `把 ID ${result.id} 改归 ${ownerName} 后合并`);
+        move.type = 'button';
+        move.addEventListener('click', async () => {
+          move.disabled = true;
+          try {
+            await api('POST', '/api/accounts/owner', {ref: String(result.id), user_id: primaryOwner.user_id});
+            await loadAccountOwners();
+            await mergeSelected([String(result.id)]);
+          } catch (error) {
+            move.disabled = false;
+            setActivity(`改归属失败：${error.message}`);
+          }
+        });
+        line.append(' ', move);
       }
       box.append(line);
     }

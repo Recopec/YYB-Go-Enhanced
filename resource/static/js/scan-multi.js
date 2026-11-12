@@ -6,9 +6,15 @@
 // here without a change to this file.
 (() => {
   'use strict';
-  const QR_TTL = 110;
+  const QR_MAX_LIFETIME = 300;   // the single-channel flow's 5-minute cap
+  const POLL_FAILURES = 3;       // consecutive poll errors before the QR is declared dead
   const POLL_MS = 1500;
   const CONFIRM_RETRIES = 11;
+  // LDPlayer scan tickets are single-shot and the session is stored per proxy, so
+  // a dynamic proxy makes the first call fail with ManualAuth -10 and the account
+  // is expired. Measured 2026-11-13: 14 of 22 accounts died on their first call.
+  const BLOCKED = {ldplayer: '不要用：雷电是一次性扫码票据，会话按代理绑定，首次取码即 ManualAuth -10 失效。'};
+  const fmtElapsed = seconds => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   const $ = id => document.getElementById(id);
   const node = (tag, className, content) => {
     const element = document.createElement(tag);
@@ -52,7 +58,9 @@
       this.sid = null;
       this.gen = 0;
       this.busy = null;
-      this.left = 0;
+      this.elapsed = 0;
+      this.pollFailures = 0;
+      this.proxyLabel = '';
       this.pollTimer = null;
       this.clock = null;
       this.card = node('article', 'multi-card');
@@ -64,9 +72,9 @@
       this.qr.setAttribute('aria-label', `${channel.name} 登录二维码`);
       this.line = node('div', 'multi-line');
       this.line.setAttribute('aria-live', 'polite');
-      this.refresh = node('button', 'btn', '重新生成');
+      this.refresh = node('button', 'btn primary', '生成二维码');
       this.refresh.type = 'button';
-      this.refresh.addEventListener('click', () => this.start());
+      this.refresh.addEventListener('click', () => activate(this));
       const actions = node('div', 'multi-actions');
       actions.append(this.refresh);
       this.card.append(head, this.qr, this.line, actions);
@@ -76,6 +84,17 @@
       this.card.dataset.state = name;
       this.line.textContent = text;
       this.refresh.disabled = name === 'saving';
+    }
+
+    // A channel listed in BLOCKED must not create a QR: the button stays off and
+    // the card says why instead of spending a proxy extraction.
+    block(reason) {
+      this.stopTimers();
+      this.refresh.disabled = true;
+      this.refresh.textContent = '不要用';
+      this.refresh.title = reason;
+      this.line.textContent = reason;
+      this.card.dataset.state = 'idle';
     }
 
     stopTimers() {
@@ -95,6 +114,35 @@
       this.gen += 1;
       this.stopTimers();
       await this.retire();
+    }
+
+    // Nothing is fetched until the operator asks for this channel: every QR
+    // resolves a proxy, so idle cards must not spend quota.
+    idle(text) {
+      this.gen += 1;
+      this.stopTimers();
+      this.sid = null;
+      this.kind = 'qr';
+      delete this.card.dataset.health;
+      this.qr.classList.remove('waiting');
+      this.qr.textContent = '尚未生成二维码';
+      this.state('idle', text || '需要扫码时再生成，避免提前消耗代理额度');
+      this.refresh.textContent = '生成二维码';
+      this.refresh.classList.add('primary');
+      if (BLOCKED[this.channel.id]) this.block(BLOCKED[this.channel.id]);
+    }
+
+    // Mirrors the single-channel flow: stop polling, retire the session and wait
+    // for the operator instead of silently extracting another proxy.
+    expire(reason) {
+      this.stopTimers();
+      this.kind = 'qr';
+      this.qr.classList.remove('waiting');
+      this.qr.textContent = '二维码已失效';
+      this.state('expired', `二维码已失效 · ${reason}（已停止轮询以保护代理额度）`);
+      this.refresh.textContent = '重新生成';
+      this.refresh.classList.add('primary');
+      this.retire();
     }
 
     // The channel already has an account in the group: no QR until the operator
@@ -120,17 +168,26 @@
         this.state('done', `已添加 · ID ${account.id}`);
       }
       this.refresh.textContent = '重新扫码';
+      if (BLOCKED[this.channel.id]) this.block(BLOCKED[this.channel.id]);
     }
 
     async start() {
+      if (BLOCKED[this.channel.id]) { this.block(BLOCKED[this.channel.id]); return; }
       const gen = ++this.gen;
       this.kind = 'qr';
       this.stopTimers();
+      // Resolving a proxy spends provider quota, so every generation is confirmed
+      // first when a proxy is configured.
+      if (cfg.usesProxy && cfg.usesProxy() && cfg.confirmRefresh) {
+        const ok = await cfg.confirmRefresh(this.channel.name);
+        if (!ok || gen !== this.gen) return;
+      }
       await this.retire();
       if (gen !== this.gen) return;
       delete this.card.dataset.health;
       this.refresh.classList.remove('primary');
-      this.refresh.textContent = '重新生成';
+      this.refresh.disabled = true;
+      this.refresh.textContent = '正在生成…';
       this.qr.classList.remove('waiting');
       this.qr.textContent = '正在生成二维码';
       this.state('loading', '正在获取二维码');
@@ -147,22 +204,34 @@
         image.src = result.image_base64 || `${result.image_url}?t=${Date.now()}`;
         image.addEventListener('error', () => { if (gen === this.gen) this.state('error', '二维码图片加载失败，请重新生成'); });
         this.qr.replaceChildren(image);
-        this.state('waiting', result.proxy ? `等待扫码 · ${result.proxy}` : '等待扫码');
-        this.left = QR_TTL;
+        this.elapsed = 0;
+        this.pollFailures = 0;
+        this.proxyLabel = result.proxy || '';
+        this.refresh.disabled = false;
+        this.refresh.textContent = '重新生成';
+        this.state('waiting', this.waitingText());
         this.clock = setInterval(() => {
           if (gen !== this.gen) return;
-          this.left -= 1;
-          if (this.left <= 0) {
-            this.stopTimers();
-            this.start();
-          } else if (this.card.dataset.state === 'waiting') {
-            this.line.textContent = `等待扫码 · ${this.left}s 后自动刷新`;
+          this.elapsed += 1;
+          if (this.elapsed >= QR_MAX_LIFETIME) {
+            this.expire('已达到 5 分钟有效期上限');
+            return;
           }
+          if (this.card.dataset.state === 'waiting') this.line.textContent = this.waitingText();
         }, 1000);
         this.pollTimer = setInterval(() => this.poll(gen), POLL_MS);
       } catch (error) {
-        if (gen === this.gen) this.state('error', `获取二维码失败：${error.message}`);
+        if (gen !== this.gen) return;
+        this.refresh.disabled = false;
+        this.refresh.textContent = '重新生成';
+        this.refresh.classList.add('primary');
+        this.state('error', `获取二维码失败：${error.message}`);
       }
+    }
+
+    waitingText() {
+      const waited = `等待扫码 · 已等待 ${fmtElapsed(this.elapsed)}`;
+      return this.proxyLabel ? `${waited} · ${this.proxyLabel}` : waited;
     }
 
     async poll(gen) {
@@ -174,7 +243,7 @@
         if (sid !== this.sid || gen !== this.gen) return;
         if (result.status === 'pending') {
           this.qr.classList.remove('waiting');
-          if (this.card.dataset.state !== 'waiting') this.state('waiting', '等待扫码');
+          if (this.card.dataset.state !== 'waiting') this.state('waiting', this.waitingText());
         } else if (result.status === 'scanned') {
           this.qr.classList.add('waiting');
           this.state('scanned', '已扫码，请在手机上确认授权');
@@ -183,15 +252,20 @@
           this.stopTimers();
           this.confirm(sid, gen, 0);
         } else if (result.status === 'expired' || result.status === 'unknown') {
-          this.stopTimers();
-          this.start();
+          this.expire(result.status === 'expired' ? '微信端反馈二维码已过期' : '二维码状态未知已失效');
         } else if (result.status === 'cancelled') {
           this.stopTimers();
           this.qr.classList.remove('waiting');
           this.state('error', '已取消，请重新生成二维码');
         }
       } catch {
-        if (sid === this.sid && gen === this.gen) this.line.textContent = '网络暂时波动，正在自动重试';
+        if (sid !== this.sid || gen !== this.gen) return;
+        this.pollFailures += 1;
+        if (this.pollFailures >= POLL_FAILURES) {
+          this.expire('与微信或代理服务器连接中断');
+          return;
+        }
+        this.line.textContent = `网络连接波动，正在自动重试 (${this.pollFailures}/${POLL_FAILURES})…`;
       } finally {
         if (this.busy === sid) this.busy = null;
       }
@@ -356,6 +430,7 @@
       const existing = base && base.members.find(member => productOf(member) === channel.id);
       if (scannedHere) scanner.showDone(scannedHere, false);
       else if (existing) scanner.showDone(existing, true);
+      else scanner.idle();
     }
     const note = $('multiBase');
     if (base) {
@@ -368,7 +443,16 @@
     }
   }
 
-  const startPending = () => scanners.forEach(scanner => { if (scanner.kind !== 'done') scanner.start(); });
+  // One QR at a time: each generation resolves a proxy, so the operator picks the
+  // channel they are about to scan instead of prefetching every channel.
+  async function activate(scanner) {
+    for (const other of scanners.values()) {
+      if (other === scanner || !other.sid) continue;
+      await other.stop();
+      other.idle('已停止：同一时间只保留一个渠道的二维码');
+    }
+    scanner.start();
+  }
   const stopAll = () => Promise.all([...scanners.values()].map(scanner => scanner.stop()));
 
   async function setActive(on) {
@@ -383,7 +467,6 @@
       buildCards();
       renderMembers();
       if (base) cfg.showAccount(base.primary);
-      startPending();
     } else {
       await stopAll();
       scanners.clear();
@@ -441,7 +524,14 @@
     init,
     active: () => active,
     stopAll,
-    restart: () => { if (active) scanners.forEach(scanner => { if (scanner.kind === 'qr') scanner.start(); }); },
+    restart: () => {
+      if (!active) return;
+      scanners.forEach(scanner => {
+        if (scanner.kind !== 'qr') return;
+        scanner.stop();
+        scanner.idle('代理已更新，点击生成二维码');
+      });
+    },
     syncRef: () => { const root = rootId(); return root ? String(root) : ''; }
   };
 })();
