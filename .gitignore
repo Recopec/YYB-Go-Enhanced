@@ -14,3 +14,12 @@ __pycache__/
 /yyb-go
 /dist/
 /.codex-tmp/
+
+# Local runtime artifacts (never commit: 38MB binary, derived web cache, DB backups)
+/yyb-go.exe
+/resource/.web-assets/
+/resource/db_backup_*/
+# start.bat carries YYB_INTEGRATION_TOKEN in clear text
+/start.bat
+# Local business scripts kept out of the server tree
+/scripts/code-collection-share/
