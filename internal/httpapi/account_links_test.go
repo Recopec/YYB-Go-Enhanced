@@ -23,6 +23,46 @@ func TestAccountLinkURLUsesForwardedPublicAddress(t *testing.T) {
 	}
 }
 
+func TestAccountLinkURLKeepsPortDroppedByProxy(t *testing.T) {
+	app := &App{}
+	req := httptest.NewRequest("POST", "http://yyb-go:8000/api/account-links", nil)
+	req.Host = "yyb.example.com:8110"
+	req.Header.Set("X-Forwarded-Host", "yyb.example.com")
+	got := app.accountLinkURL(req, "abc123")
+	want := "http://yyb.example.com:8110/account-link/abc123"
+	if got != want {
+		t.Fatalf("accountLinkURL() = %q, want %q", got, want)
+	}
+}
+
+func TestAccountLinkURLUsesForwardedPort(t *testing.T) {
+	app := &App{}
+	req := httptest.NewRequest("POST", "http://yyb-go:8000/api/account-links", nil)
+	req.Host = "yyb-go:8000"
+	req.Header.Set("X-Forwarded-Host", "yyb.example.com")
+	req.Header.Set("X-Forwarded-Port", "8443")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	got := app.accountLinkURL(req, "abc123")
+	want := "https://yyb.example.com:8443/account-link/abc123"
+	if got != want {
+		t.Fatalf("accountLinkURL() = %q, want %q", got, want)
+	}
+}
+
+func TestAccountLinkURLDropsDefaultPort(t *testing.T) {
+	app := &App{}
+	req := httptest.NewRequest("POST", "http://yyb-go:8000/api/account-links", nil)
+	req.Host = "yyb-go:8000"
+	req.Header.Set("X-Forwarded-Host", "yyb.example.com")
+	req.Header.Set("X-Forwarded-Port", "443")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	got := app.accountLinkURL(req, "abc123")
+	want := "https://yyb.example.com/account-link/abc123"
+	if got != want {
+		t.Fatalf("accountLinkURL() = %q, want %q", got, want)
+	}
+}
+
 func TestAccountLinkURLUsesForwardedParameter(t *testing.T) {
 	app := &App{}
 	req := httptest.NewRequest("POST", "http://yyb-go:8000/api/account-links", nil)

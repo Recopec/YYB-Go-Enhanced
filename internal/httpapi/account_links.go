@@ -407,7 +407,57 @@ func (a *App) accountLinkURL(r *http.Request, token string) string {
 	if !validPublicHost(host) {
 		host = "localhost"
 	}
+	host = publicHostWithPort(r, host, scheme)
 	return scheme + "://" + host + "/account-link/" + token
+}
+
+// publicHostWithPort restores a port that a reverse proxy dropped. nginx's
+// `$host` (and many `Forwarded: host=` values) omit the port even when the
+// browser reached the console on an explicit one, which produced share links
+// pointing at the wrong port. X-Forwarded-Port is authoritative; otherwise the
+// request's own Host is reused when it names the same host.
+func publicHostWithPort(r *http.Request, host, scheme string) string {
+	if hostHasPort(host) {
+		return host
+	}
+	port := forwardedValue(r.Header.Get("X-Forwarded-Port"))
+	if !validPort(port) {
+		port = ""
+	}
+	if port == "" {
+		if requestHost, requestPort, err := net.SplitHostPort(r.Host); err == nil && validPort(requestPort) && sameHost(requestHost, host) {
+			port = requestPort
+		}
+	}
+	if port == "" || (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		return host
+	}
+	return host + ":" + port
+}
+
+func hostHasPort(host string) bool {
+	if strings.HasPrefix(host, "[") {
+		end := strings.IndexByte(host, ']')
+		return end >= 0 && len(host) > end+1
+	}
+	return strings.Count(host, ":") == 1
+}
+
+func sameHost(a, b string) bool {
+	return strings.EqualFold(strings.Trim(a, "[]"), strings.Trim(b, "[]"))
+}
+
+func validPort(port string) bool {
+	if port == "" || len(port) > 5 {
+		return false
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0 && n <= 65535
 }
 
 // forwardedValue returns the first value from a comma-separated proxy header.
@@ -855,7 +905,7 @@ func (a *App) claimLinkAccount(ctx context.Context, link *store.AccountLink, acc
 	}
 	owner, err := a.auth.AccountOwner(ctx, accountID)
 	if err == nil && owner != *link.OwnerUserID {
-		return errors.New("该 YYB 账号已属于其他用户")
+		return fmt.Errorf("该 YYB 账号已属于其他用户（ref=%d，归属用户 %s）", accountID, a.ownerLabel(ctx, owner))
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err

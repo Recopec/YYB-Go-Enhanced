@@ -80,8 +80,7 @@ func TestCompactAccountIDsRemapsFleetPointers(t *testing.T) {
 	}
 }
 
-// Account IDs are reused after a delete. Members of a removed primary must not
-// keep pointing at an ID that an unrelated new account may take.
+// Removing a fleet primary must not leave its members pointing at a deleted ID.
 func TestDeletingFleetPrimaryMovesItsMembers(t *testing.T) {
 	db, acc := fleetTestAccounts(t, 3)
 	ctx := context.Background()

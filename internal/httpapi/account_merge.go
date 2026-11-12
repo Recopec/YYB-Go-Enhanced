@@ -53,7 +53,10 @@ func (a *App) handleAccountMerge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 422, "来源和保留 ID 不能相同")
 		return
 	}
+	// owner is the claim the source carries and that has to survive the merge;
+	// adoptTarget marks a target that has no claim of its own and inherits it.
 	var owner int64
+	adoptTarget := false
 	if a.auth != nil {
 		sourceOwner, sourceErr := a.auth.AccountOwner(r.Context(), source.ID)
 		targetOwner, targetErr := a.auth.AccountOwner(r.Context(), target.ID)
@@ -61,9 +64,14 @@ func (a *App) handleAccountMerge(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "读取账号归属失败")
 			return
 		}
-		if sourceOwner != targetOwner {
-			writeError(w, 409, "两个账号归属不同，不能合并；请先核对归属")
+		switch {
+		case sourceOwner != 0 && targetOwner != 0 && sourceOwner != targetOwner:
+			writeError(w, 409, "两个账号归属不同（来源归 "+a.ownerLabel(r.Context(), sourceOwner)+"，保留 ID 归 "+a.ownerLabel(r.Context(), targetOwner)+"），不能合并；请先核对归属")
 			return
+		case sourceOwner != 0 && targetOwner == 0:
+			// The source claim is deleted with the source ID, so the surviving
+			// ID has to inherit it or the account becomes invisible to its owner.
+			adoptTarget = true
 		}
 		owner = sourceOwner
 	}
@@ -101,19 +109,33 @@ func (a *App) handleAccountMerge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if adoptTarget {
+		if err = a.auth.ClaimAccount(r.Context(), target.ID, owner); err != nil {
+			writeError(w, 500, "写入账号归属失败")
+			return
+		}
+	}
 	if owner > 0 {
 		if err = a.auth.RemoveAccountOwner(r.Context(), source.ID, owner); err != nil {
+			if adoptTarget {
+				rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = a.auth.RemoveAccountOwner(rollbackCtx, target.ID, owner)
+				cancel()
+			}
 			writeError(w, 409, "来源归属已变化，请重新检查")
 			return
 		}
 	}
 	merged, err := a.db.MergeAccountAuthorization(r.Context(), source, target)
 	if err != nil {
-		if owner > 0 {
-			rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = a.auth.ClaimAccount(rollbackCtx, source.ID, owner)
-			cancel()
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if adoptTarget {
+			_ = a.auth.RemoveAccountOwner(rollbackCtx, target.ID, owner)
 		}
+		if owner > 0 {
+			_ = a.auth.ClaimAccount(rollbackCtx, source.ID, owner)
+		}
+		cancel()
 		if errors.Is(err, store.ErrAccountAuthorizationChanged) {
 			writeError(w, 409, "账号授权已变化，请重新预览")
 		} else if errors.Is(err, store.ErrMergeSourceHasJobs) {

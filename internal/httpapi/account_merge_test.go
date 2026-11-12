@@ -167,6 +167,55 @@ func TestMergeOwnershipPermissionsAndClaimCleanup(t *testing.T) {
 	}
 }
 
+// Ownership has to survive the merge even when only one side carries it: the
+// surviving ID inherits the source claim, while an unowned source never blocks
+// a merge into an owned target (QQ Browser pushes and administrator scans
+// create such accounts).
+func TestMergeMovesOwnershipToTheSurvivingID(t *testing.T) {
+	app, err := NewApp(Config{ResourceRoot: t.TempDir(), AuthDriver: "sqlite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	ctx := context.Background()
+	user, _ := app.auth.CreateUser(ctx, "owner", "Owner", "local-owner-password", "user")
+	merge := func(source, target *store.WechatAccount) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{
+			"source_ref":  strconv.FormatInt(source.ID, 10),
+			"target_ref":  strconv.FormatInt(target.ID, 10),
+			"confirm":     true,
+			"preview_key": app.accountMergePreviewKey(source, target),
+		})
+		w := httptest.NewRecorder()
+		app.handleAccountMerge(w, httptest.NewRequest("POST", "/accounts/merge", strings.NewReader(string(body))))
+		return w
+	}
+
+	unownedTarget, _ := app.db.UpsertAccount(ctx, "unowned-target", "old", nil, nil, nil, nil, nil, nil)
+	ownedSource, _ := app.db.UpsertAccount(ctx, "pcmgr:owned-source", "new", nil, nil, nil, nil, map[string]any{"provider": "pcmgr"}, nil)
+	if err = app.auth.ClaimAccount(ctx, ownedSource.ID, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w := merge(ownedSource, unownedTarget); w.Code != 200 {
+		t.Fatalf("a merge into an unowned target was refused: %d %s", w.Code, w.Body.String())
+	}
+	if owner, err := app.auth.AccountOwner(ctx, unownedTarget.ID); err != nil || owner != user.ID {
+		t.Fatalf("the surviving ID did not inherit the claim: owner=%d err=%v", owner, err)
+	}
+
+	ownedTarget, _ := app.db.UpsertAccount(ctx, "owned-target", "old", nil, nil, nil, nil, nil, nil)
+	unownedSource, _ := app.db.UpsertAccount(ctx, "pcmgr:unowned-source", "new", nil, nil, nil, nil, map[string]any{"provider": "pcmgr"}, nil)
+	if err = app.auth.ClaimAccount(ctx, ownedTarget.ID, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w := merge(unownedSource, ownedTarget); w.Code != 200 {
+		t.Fatalf("an unowned source was refused: %d %s", w.Code, w.Body.String())
+	}
+	if owner, err := app.auth.AccountOwner(ctx, ownedTarget.ID); err != nil || owner != user.ID {
+		t.Fatalf("the target lost its claim: owner=%d err=%v", owner, err)
+	}
+}
+
 func TestMergeReferenceRetryCannotHijackReusedSourceID(t *testing.T) {
 	fake, server := newFakeQingLong(t)
 	app, _, _ := newRunsTestApp(t, server.URL)
@@ -178,8 +227,16 @@ func TestMergeReferenceRetryCannotHijackReusedSourceID(t *testing.T) {
 		t.Fatal(err)
 	}
 	replacement, err := app.db.UpsertAccount(ctx, "unrelated-new-account", "other", nil, nil, nil, nil, nil, nil)
-	if err != nil || replacement.ID != source.ID {
-		t.Fatal("test ID was not reused", err)
+	if err != nil || replacement.ID == source.ID {
+		t.Fatalf("new account inherited the released ID: %+v, %v", replacement, err)
+	}
+	// Only an explicit compaction can move a live account onto a released ID.
+	// The panel guard must still refuse to redirect the old numeric reference.
+	if _, err := app.db.CompactAccountIDs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := app.db.GetAccount(ctx, source.ID); err != nil || moved.OpenID != "unrelated-new-account" {
+		t.Fatalf("compaction did not place the new account on the released ID: %+v, %v", moved, err)
 	}
 	fake.mu.Lock()
 	fake.envs = []qingLongEnv{{ID: 4, Name: "YYB_SERVER", Value: "host@2", Status: 0}}

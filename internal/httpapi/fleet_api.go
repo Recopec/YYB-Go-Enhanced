@@ -53,7 +53,11 @@ type fleetBindOutcome struct {
 // bindFleetMember binds member into the fleet rooted at primary. Both accounts
 // must belong to the same owner, the member must not sit in another fleet, and
 // the WeChat unionid of the two must not differ unless force is set. A missing
-// unionid is let through with a notice, a confirmed mismatch is not.
+// unionid is let through with a notice, a confirmed mismatch is not. An account
+// with no claim at all (owner 0, which the QQ Browser extension push and
+// administrator scans produce) has nothing to protect: it adopts the other
+// side's owner instead of blocking the bind, because one fleet answers to one
+// user. Two real, different owners still refuse.
 func (a *App) bindFleetMember(ctx context.Context, member, primary *store.WechatAccount, force bool) fleetBindOutcome {
 	if member.ID == primary.ID {
 		return fleetBindOutcome{Status: http.StatusUnprocessableEntity, Error: "成员与主账号是同一个账号"}
@@ -61,14 +65,23 @@ func (a *App) bindFleetMember(ctx context.Context, member, primary *store.Wechat
 	if fleetPrimaryOf(member) > 0 && fleetPrimaryOf(member) != primary.ID {
 		return fleetBindOutcome{Status: http.StatusUnprocessableEntity, Error: fmt.Sprintf("账号 %d 已绑定其他编队（主账号 %d），请先解绑", member.ID, fleetPrimaryOf(member))}
 	}
+	var adoptID, adoptOwner int64
+	adoptNote := ""
 	if a.auth != nil {
 		memberOwner, memberErr := a.auth.AccountOwner(ctx, member.ID)
 		primaryOwner, primaryErr := a.auth.AccountOwner(ctx, primary.ID)
 		if memberErr != nil && !errors.Is(memberErr, sql.ErrNoRows) || primaryErr != nil && !errors.Is(primaryErr, sql.ErrNoRows) {
 			return fleetBindOutcome{Status: http.StatusInternalServerError, Error: "读取账号归属失败"}
 		}
-		if memberOwner != primaryOwner {
-			return fleetBindOutcome{Status: http.StatusConflict, Error: "两个账号归属不同，不能编队；请先核对归属"}
+		switch {
+		case memberOwner != 0 && primaryOwner != 0 && memberOwner != primaryOwner:
+			return fleetBindOutcome{Status: http.StatusConflict, Error: fmt.Sprintf("两个账号归属不同（成员归 %s，主账号归 %s），不能编队；请先核对归属", a.ownerLabel(ctx, memberOwner), a.ownerLabel(ctx, primaryOwner))}
+		case memberOwner == 0 && primaryOwner != 0:
+			adoptID, adoptOwner = member.ID, primaryOwner
+			adoptNote = fmt.Sprintf("成员原未归属，已归属为主账号所有者 %s", a.ownerLabel(ctx, primaryOwner))
+		case primaryOwner == 0 && memberOwner != 0:
+			adoptID, adoptOwner = primary.ID, memberOwner
+			adoptNote = fmt.Sprintf("主账号原未归属，已归属为成员所有者 %s", a.ownerLabel(ctx, memberOwner))
 		}
 	}
 	notice := ""
@@ -81,6 +94,17 @@ func (a *App) bindFleetMember(ctx context.Context, member, primary *store.Wechat
 			return fleetBindOutcome{Status: http.StatusUnprocessableEntity, Error: detail}
 		}
 		notice = detail
+	}
+	// The claim is written only after the unionid gate, so a refused bind never
+	// hands an account to the other side's user.
+	if adoptID != 0 {
+		if err := a.auth.ClaimAccount(ctx, adoptID, adoptOwner); err != nil {
+			return fleetBindOutcome{Status: http.StatusInternalServerError, Error: "写入账号归属失败: " + err.Error()}
+		}
+		if notice != "" {
+			notice += "；"
+		}
+		notice += adoptNote
 	}
 	// The primary anchors the fleet: it points at itself so member queries
 	// and dispatch both resolve through one id.

@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -174,6 +176,68 @@ func TestFleetBindingRefusesAccountsOfAnotherOwner(t *testing.T) {
 	app.handleFleetAPI(rec, single)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("single bind across owners answered %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// An account with no claim at all has nothing to protect: it adopts the other
+// side's owner instead of blocking the bind. QQ Browser extension pushes and
+// administrator scans create such accounts, so refusing them made a merge fail
+// on whichever member happened to be unowned.
+func TestFleetBindingAdoptsUnownedAccounts(t *testing.T) {
+	app, err := NewApp(Config{ResourceRoot: t.TempDir(), AuthDriver: "sqlite", RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	ctx := context.Background()
+	app.fetchUserInfo = func(context.Context, protocol.LoginBufferCredentials) (map[string]any, error) {
+		return map[string]any{}, nil
+	}
+	alice, _ := app.auth.CreateUser(ctx, "alice", "Alice", "local-alice-password", "user")
+	mk := func(openid string) *store.WechatAccount {
+		acc, err := app.db.UpsertAccount(ctx, openid, "buffer", nil, nil, nil, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return acc
+	}
+	ownedPrimary, unownedMember := mk("owned-primary"), mk("unowned-member")
+	unownedPrimary, ownedMember := mk("unowned-primary"), mk("owned-member")
+	barePrimary, bareMember := mk("bare-primary"), mk("bare-member")
+	for _, acc := range []*store.WechatAccount{ownedPrimary, ownedMember} {
+		if err := app.auth.ClaimAccount(ctx, acc.ID, alice.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin := &auth.User{ID: 99, Role: "admin"}
+
+	out, reply := postBindMany(t, app, `{"primary_ref":"`+itoa64(ownedPrimary.ID)+`","member_refs":["`+itoa64(unownedMember.ID)+`"]}`, admin)
+	if out.Code != http.StatusOK || !reply.Data.Results[0].Bound {
+		t.Fatalf("an unowned member should bind: %d %s", out.Code, out.Body.String())
+	}
+	if !strings.Contains(reply.Data.Results[0].Notice, "未归属") {
+		t.Fatalf("the adopted claim must be reported: %+v", reply.Data.Results[0])
+	}
+	if owner, err := app.auth.AccountOwner(ctx, unownedMember.ID); err != nil || owner != alice.ID {
+		t.Fatalf("the unowned member should adopt the primary owner: owner=%d err=%v", owner, err)
+	}
+
+	out, reply = postBindMany(t, app, `{"primary_ref":"`+itoa64(unownedPrimary.ID)+`","member_refs":["`+itoa64(ownedMember.ID)+`"]}`, admin)
+	if out.Code != http.StatusOK || !reply.Data.Results[0].Bound {
+		t.Fatalf("an unowned primary should bind: %d %s", out.Code, out.Body.String())
+	}
+	if owner, err := app.auth.AccountOwner(ctx, unownedPrimary.ID); err != nil || owner != alice.ID {
+		t.Fatalf("the unowned primary should adopt the member owner: owner=%d err=%v", owner, err)
+	}
+
+	out, reply = postBindMany(t, app, `{"primary_ref":"`+itoa64(barePrimary.ID)+`","member_refs":["`+itoa64(bareMember.ID)+`"]}`, admin)
+	if out.Code != http.StatusOK || !reply.Data.Results[0].Bound {
+		t.Fatalf("two unowned accounts should bind: %d %s", out.Code, out.Body.String())
+	}
+	for _, acc := range []*store.WechatAccount{barePrimary, bareMember} {
+		if owner, err := app.auth.AccountOwner(ctx, acc.ID); !errors.Is(err, sql.ErrNoRows) || owner != 0 {
+			t.Fatalf("account %d gained a claim it should not have: owner=%d err=%v", acc.ID, owner, err)
+		}
 	}
 }
 

@@ -142,14 +142,16 @@ uin=NULL,status='alive',last_checked_at=?,updated_at=? WHERE id=?`, openID, buff
 		if !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		if err = tx.QueryRowContext(ctx, `SELECT MIN(candidate) FROM (SELECT 1 AS candidate UNION ALL SELECT id+1 FROM wechat_accounts)
-WHERE candidate NOT IN (SELECT id FROM wechat_accounts)`).Scan(&id); err != nil {
-			return nil, err
+		// A new member takes the next AUTOINCREMENT value; a released ID stays
+		// retired so an old numeric reference cannot point at a new channel.
+		inserted, execErr := tx.ExecContext(ctx, `INSERT INTO wechat_accounts(openid,login_buffer,credentials,nickname,alias,avatar,user_info,status,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,'alive',?,?)`, openID, buffer, credJSON, nullableString(nickname), nullableString(nickname), nullableString(avatar), userJSON, now, now)
+		if execErr != nil {
+			return nil, execErr
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO wechat_accounts(id,openid,login_buffer,credentials,nickname,alias,avatar,user_info,status,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,'alive',?,?)`, id, openID, buffer, credJSON, nullableString(nickname), nullableString(nickname), nullableString(avatar), userJSON, now, now)
-		if err != nil {
-			return nil, err
+		id, execErr = inserted.LastInsertId()
+		if execErr != nil {
+			return nil, execErr
 		}
 		// Missing settings mean direct access, just as for the source account.
 		_, err = tx.ExecContext(ctx, `INSERT INTO account_proxy_settings(account_id,mode,proxy_type,static_proxy,api_url,provider_profile_id,
