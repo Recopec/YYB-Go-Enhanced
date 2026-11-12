@@ -164,6 +164,10 @@ func open(ctx context.Context, driver, dsn string, migrate bool) (*Store, error)
 	schema := mysqlSchema
 	if driver == "sqlite" {
 		schema = sqliteSchema
+		if _, err = db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("configure auth sqlite: %w", err)
+		}
 		if _, err = db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("configure auth sqlite: %w", err)
@@ -577,6 +581,21 @@ func (s *Store) AccountOwner(ctx context.Context, accountID int64) (int64, error
 	return userID, err
 }
 
+// SetAccountOwner moves a claim to another user. ClaimAccount stays insert-only
+// so a scan cannot move an account; this is the explicit, administrator-driven
+// path and overwrites whatever claim the account carries.
+func (s *Store) SetAccountOwner(ctx context.Context, accountID, userID int64) error {
+	now := time.Now().UTC()
+	query := `INSERT INTO account_owners (account_id, user_id, claimed_at) VALUES (?, ?, ?)
+        ON CONFLICT(account_id) DO UPDATE SET user_id=excluded.user_id, claimed_at=excluded.claimed_at`
+	if s.driver == "mysql" {
+		query = `INSERT INTO account_owners (account_id, user_id, claimed_at) VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE user_id=VALUES(user_id), claimed_at=VALUES(claimed_at)`
+	}
+	_, err := s.db.ExecContext(ctx, query, accountID, userID, now)
+	return err
+}
+
 // Remove a known ownership claim before an explicit account merge releases ID.
 func (s *Store) RemoveAccountOwner(ctx context.Context, accountID, expectedUserID int64) error {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM account_owners WHERE account_id=? AND user_id=?", accountID, expectedUserID)
@@ -609,6 +628,33 @@ func (s *Store) AccountCounts(ctx context.Context) (map[int64]int, error) {
 		counts[userID] = count
 	}
 	return counts, rows.Err()
+}
+
+// AccountOwnerRow is one claim: which user owns which YYB account. The console
+// shows this next to the account because ownership lives in the auth database,
+// separate from the account credentials.
+type AccountOwnerRow struct {
+	AccountID int64
+	UserID    int64
+}
+
+// AccountOwners lists every claim ordered by account ID so the console can map
+// an account list to users without joining across databases.
+func (s *Store) AccountOwners(ctx context.Context) ([]AccountOwnerRow, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT account_id, user_id FROM account_owners ORDER BY account_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AccountOwnerRow, 0)
+	for rows.Next() {
+		var row AccountOwnerRow
+		if err := rows.Scan(&row.AccountID, &row.UserID); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 // AccountIDs returns the YYB account IDs owned by a user. Ownership is kept

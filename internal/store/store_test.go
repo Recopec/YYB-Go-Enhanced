@@ -243,7 +243,7 @@ func TestAccountExpiredAtLifecycle(t *testing.T) {
 	_ = origExpiredAt
 }
 
-func TestUpsertAccountReusesLowestFreeID(t *testing.T) {
+func TestUpsertAccountRetiresDeletedIDs(t *testing.T) {
 	db, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -254,15 +254,29 @@ func TestUpsertAccountReusesLowestFreeID(t *testing.T) {
 	if err != nil || first.ID != 1 {
 		t.Fatalf("first account = %+v, err=%v", first, err)
 	}
+	second, err := db.UpsertAccount(ctx, "openid-2", "buffer", nil, nil, nil, nil, nil, nil)
+	if err != nil || second.ID != 2 {
+		t.Fatalf("second account = %+v, err=%v", second, err)
+	}
 	if err := db.DeleteAccount(ctx, first.ID); err != nil {
 		t.Fatalf("DeleteAccount() error = %v", err)
 	}
-	recreated, err := db.UpsertAccount(ctx, "openid-2", "buffer", nil, nil, nil, nil, nil, nil)
+	third, err := db.UpsertAccount(ctx, "openid-3", "buffer", nil, nil, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("recreated account error = %v", err)
+		t.Fatalf("third account error = %v", err)
 	}
-	if recreated.ID != 1 {
-		t.Fatalf("recreated account id = %d, want 1", recreated.ID)
+	if third.ID <= second.ID {
+		t.Fatalf("released ID was reused: first=%d second=%d third=%d", first.ID, second.ID, third.ID)
+	}
+	if err := db.DeleteAccount(ctx, third.ID); err != nil {
+		t.Fatalf("DeleteAccount() error = %v", err)
+	}
+	fourth, err := db.UpsertAccount(ctx, "openid-4", "buffer", nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("fourth account error = %v", err)
+	}
+	if fourth.ID <= third.ID {
+		t.Fatalf("ID went backwards after delete: third=%d fourth=%d", third.ID, fourth.ID)
 	}
 }
 
@@ -414,34 +428,6 @@ func TestAccountLinkCleanupRemovesConsumedRevokedAndExpired(t *testing.T) {
 	}
 	if reused.ID != 1 {
 		t.Fatalf("reused link ID = %d, want 1", reused.ID)
-	}
-}
-
-func TestUpsertAccountReusesGapAfterDelete(t *testing.T) {
-	db, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-	status := "alive"
-	first, err := db.UpsertAccount(ctx, "gap-openid-1", "buffer-1", nil, nil, nil, nil, nil, &status)
-	if err != nil {
-		t.Fatalf("first UpsertAccount() error = %v", err)
-	}
-	second, err := db.UpsertAccount(ctx, "gap-openid-2", "buffer-2", nil, nil, nil, nil, nil, &status)
-	if err != nil {
-		t.Fatalf("second UpsertAccount() error = %v", err)
-	}
-	if err := db.DeleteAccount(ctx, first.ID); err != nil {
-		t.Fatalf("DeleteAccount() error = %v", err)
-	}
-	reused, err := db.UpsertAccount(ctx, "gap-openid-3", "buffer-3", nil, nil, nil, nil, nil, &status)
-	if err != nil {
-		t.Fatalf("reused UpsertAccount() error = %v", err)
-	}
-	if reused.ID != first.ID || second.ID != 2 {
-		t.Fatalf("gap reuse IDs = first:%d second:%d reused:%d", first.ID, second.ID, reused.ID)
 	}
 }
 

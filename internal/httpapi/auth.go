@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -132,6 +133,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	a.clearLoginFailures(key)
 	token, _, err := a.auth.CreateSession(r.Context(), user.ID, r.UserAgent(), clientIP(r), a.cfg.SessionDuration)
 	if err != nil {
+		log.Printf("[auth] 创建登录会话失败 user=%d username=%s ip=%s: %v", user.ID, user.Username, clientIP(r), err)
 		writeError(w, http.StatusInternalServerError, "创建登录会话失败")
 		return
 	}
@@ -178,6 +180,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	token, _, err := a.auth.CreateSession(r.Context(), user.ID, r.UserAgent(), clientIP(r), a.cfg.SessionDuration)
 	if err != nil {
+		log.Printf("[auth] 注册后创建会话失败 user=%d username=%s ip=%s: %v", user.ID, user.Username, clientIP(r), err)
 		writeError(w, 500, "创建登录会话失败")
 		return
 	}

@@ -527,16 +527,17 @@ func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ali
 	if err != nil {
 		return nil, err
 	}
-	// Keep the lookup, lowest-free-ID calculation and write in one transaction.
-	// Otherwise two simultaneous successful scans can both select the same gap.
+	// Keep the lookup and write in one transaction so two simultaneous scans
+	// cannot create the same OpenID twice.
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Reuse the lowest free account slot. This keeps a single account at ID 1
-	// after it is deleted and scanned again, while preserving existing IDs.
+	// A new account always takes the next AUTOINCREMENT value. A deleted ID is
+	// never handed to another account, so an external numeric reference cannot
+	// silently start pointing at a different authorization.
 	var existingID int64
 	var previousCredentials sql.NullString
 	err = tx.QueryRowContext(ctx, "SELECT id,credentials FROM wechat_accounts WHERE openid=?", openid).Scan(&existingID, &previousCredentials)
@@ -560,40 +561,15 @@ func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ali
 			userJSON, credJSON, nullableString(status), observedAt, nullableString(status), now, now, existingID,
 		)
 	} else if errors.Is(err, sql.ErrNoRows) {
-		rows, queryErr := tx.QueryContext(ctx, "SELECT id FROM wechat_accounts ORDER BY id")
-		if queryErr != nil {
-			return nil, queryErr
-		}
-		nextID := int64(1)
-		for rows.Next() {
-			var id int64
-			if scanErr := rows.Scan(&id); scanErr != nil {
-				_ = rows.Close()
-				return nil, scanErr
-			}
-			if id < nextID {
-				continue
-			}
-			if id == nextID {
-				nextID++
-				continue
-			}
-			break
-		}
-		if queryErr = rows.Err(); queryErr != nil {
-			_ = rows.Close()
-			return nil, queryErr
-		}
-		_ = rows.Close()
 		var expiredAt any
 		if status != nil && *status == "expired" {
 			expiredAt = now
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO wechat_accounts
-			(id, openid, login_buffer, alias, nickname, avatar, user_info, credentials, status, expired_at, refresh_token_observed_at, created_at, updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			nextID, openid, loginBuffer, nullableString(alias), nullableString(nickname), nullableString(avatar),
+			(openid, login_buffer, alias, nickname, avatar, user_info, credentials, status, expired_at, refresh_token_observed_at, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			openid, loginBuffer, nullableString(alias), nullableString(nickname), nullableString(avatar),
 			userJSON, credJSON, nullableString(status), expiredAt, observedAt, now, now,
 		)
 	} else {
@@ -1042,10 +1018,9 @@ func (db *DB) DeleteAccount(ctx context.Context, id int64) error {
 }
 
 // deleteAccountRow removes one account row and keeps its fleet consistent in
-// the same transaction. Account IDs are reused after a delete, so a member left
-// pointing at a removed primary could later be adopted by an unrelated new
-// account. Members of a removed primary move to the lowest remaining ID; a fleet
-// left with a single account is dissolved.
+// the same transaction. IDs are never reused, so no later account can inherit
+// a removed member's numeric references. Members of a removed primary move to
+// the lowest remaining ID; a fleet left with a single account is dissolved.
 func deleteAccountRow(ctx context.Context, tx *sql.Tx, id int64) (bool, error) {
 	var formerPrimary sql.NullInt64
 	if err := tx.QueryRowContext(ctx, "SELECT fleet_primary_id FROM wechat_accounts WHERE id=?", id).Scan(&formerPrimary); err != nil && !errors.Is(err, sql.ErrNoRows) {

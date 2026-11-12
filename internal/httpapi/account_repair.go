@@ -43,7 +43,7 @@ func (a *App) handleAccountRepair(w http.ResponseWriter, r *http.Request) {
 			"mode":             "preview",
 			"confirm_required": len(candidates) > 0,
 			"candidates":       repairCandidates(candidates),
-			"note":             "仅会清理未完成扫码残留，不会重排正常账号 ID；释放的 ID 会在下次成功扫码时自动复用。",
+			"note":             "仅会清理未完成扫码残留，不会重排正常账号 ID；被清理账号的 ID 不会再分配给新账号。",
 		})
 		return
 	}

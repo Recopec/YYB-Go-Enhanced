@@ -472,6 +472,8 @@ func (a *App) Handler() http.Handler {
 	router.Any("/quick-login", gin.WrapF(a.handleQuickLoginRoot))
 	router.Any("/quick-login/*path", gin.WrapF(a.handleQuickLogin))
 	router.Any("/accounts", gin.WrapF(a.handleAccountsRoot))
+	router.GET("/api/accounts/owners", gin.WrapF(a.handleAccountOwners))
+	router.POST("/api/accounts/owner", gin.WrapF(a.handleAccountOwnerUpdate))
 	router.Any("/accounts/repair", gin.WrapF(a.handleAccountRepair))
 	router.Any("/accounts/compact", gin.WrapF(a.handleAccountCompact))
 	router.Any("/accounts/merge", gin.WrapF(a.handleAccountMerge))
@@ -1409,6 +1411,16 @@ func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// ownerLabel names the user holding an account claim so a rejected scan says
+// who to ask instead of only failing. The claim itself stays immutable.
+func (a *App) ownerLabel(ctx context.Context, userID int64) string {
+	user, err := a.auth.GetUser(ctx, userID)
+	if err != nil || user == nil {
+		return fmt.Sprintf("id=%d", userID)
+	}
+	return fmt.Sprintf("%s(id=%d)", user.Username, user.ID)
+}
+
 func (a *App) claimScannedAccount(r *http.Request, accountID int64) error {
 	if a.auth == nil {
 		return nil
@@ -1419,7 +1431,7 @@ func (a *App) claimScannedAccount(r *http.Request, accountID int64) error {
 	}
 	owner, err := a.auth.AccountOwner(r.Context(), accountID)
 	if err == nil && owner != user.ID {
-		return errors.New("该 YYB 账号已属于其他用户")
+		return fmt.Errorf("该 YYB 账号已属于其他用户（ref=%d，归属用户 %s）", accountID, a.ownerLabel(r.Context(), owner))
 	}
 	return a.auth.ClaimAccount(r.Context(), accountID, user.ID)
 }
