@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,36 @@ type tcpProxy struct {
 	Port     string
 	Username string
 	Password string
+}
+
+// ProxyConnectError is the proxy's own rejection of the tunnel request, not a
+// failure of the target. The status line is kept because providers use
+// non-standard codes (for example 645 "Proxy Authentication In Black List")
+// that must not be mistaken for a WeChat rejection.
+type ProxyConnectError struct {
+	Status string
+	Code   int
+}
+
+func (e *ProxyConnectError) Error() string {
+	return "HTTP CONNECT failed: " + e.Status
+}
+
+// IsProxyFailure reports whether err happened while negotiating with the
+// proxy, so a different exit may succeed. It must not match an upstream
+// business rejection.
+func IsProxyFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var connect *ProxyConnectError
+	if errors.As(err, &connect) {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "dial proxy failed") ||
+		strings.Contains(message, "proxy handshake to") ||
+		strings.Contains(message, "SOCKS5 username/password authentication failed")
 }
 
 func parseTCPProxy(value string) (*tcpProxy, error) {
@@ -99,6 +130,24 @@ func dialDirect(ctx context.Context, host string, port int, timeout time.Duratio
 		d.Timeout = timeout
 	}
 	return d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+}
+
+// ProbeProxyTarget verifies that a freshly extracted exit can actually tunnel
+// to the target host. Extraction success only means the provider handed out an
+// endpoint; some endpoints still answer 645/407 for the current source.
+func ProbeProxyTarget(ctx context.Context, proxyValue, targetHost string, targetPort int, timeout time.Duration) error {
+	proxy, err := parseTCPProxy(proxyValue)
+	if err != nil {
+		return err
+	}
+	if proxy == nil {
+		return nil
+	}
+	conn, err := dialViaProxy(ctx, proxy, targetHost, targetPort, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 func dialViaProxy(ctx context.Context, proxy *tcpProxy, targetHost string, targetPort int, timeout time.Duration) (net.Conn, error) {
@@ -245,7 +294,11 @@ func httpConnect(conn net.Conn, proxy *tcpProxy, targetHost string, targetPort i
 	}
 	parts := strings.Fields(line)
 	if len(parts) < 2 || !strings.HasPrefix(parts[1], "2") {
-		return fmt.Errorf("HTTP CONNECT failed: %s", strings.TrimSpace(line))
+		code := 0
+		if len(parts) >= 2 {
+			code, _ = strconv.Atoi(parts[1])
+		}
+		return &ProxyConnectError{Status: strings.TrimSpace(line), Code: code}
 	}
 	for {
 		l, err := br.ReadString('\n')

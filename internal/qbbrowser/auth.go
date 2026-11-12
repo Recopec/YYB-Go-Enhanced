@@ -130,7 +130,7 @@ func callPB(ctx context.Context, client *http.Client, method string, body []byte
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, errors.New("QQBrowser authentication transport failed")
+		return nil, fmt.Errorf("QQBrowser authentication transport failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

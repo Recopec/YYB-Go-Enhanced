@@ -148,3 +148,14 @@ func TestNativeDiagnosticsKeepLayerAndNeverCopyUnknownStage(t *testing.T) {
 		t.Fatal("native diagnostic lost layer or exposed arbitrary stage")
 	}
 }
+
+func TestProxyConnectDiagnosticsKeepStageAndCode(t *testing.T) {
+	err := fmt.Errorf("fetch fresh login buffer: %w", &protocol.ProxyConnectError{
+		Status: "HTTP/1.1 645 Proxy Authentication In Black List",
+		Code:   645,
+	})
+	want := []upstreamDiagnostic{{Stage: "proxy_connect", UpstreamCode: 645}}
+	if !reflect.DeepEqual(credentialDiagnostics(err), want) {
+		t.Fatalf("proxy diagnostics = %#v, want %#v", credentialDiagnostics(err), want)
+	}
+}

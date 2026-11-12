@@ -171,3 +171,48 @@ func TestHTTPConnectSendsBasicAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHTTPConnectReportsProxyAuthenticationBlackList(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		_, err = io.WriteString(conn, "HTTP/1.1 645 Proxy Authentication In Black List\r\n\r\n")
+		serverDone <- err
+	}()
+	proxy, err := parseTCPProxy("http-connect://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dialViaProxy(context.Background(), proxy, "example.invalid", 443, 2*time.Second)
+	var connect *ProxyConnectError
+	if !errors.As(err, &connect) {
+		t.Fatalf("proxy rejection is not typed: %v", err)
+	}
+	if connect.Code != 645 || !IsProxyFailure(err) {
+		t.Fatalf("proxy rejection = %+v, IsProxyFailure = %v", connect, IsProxyFailure(err))
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}

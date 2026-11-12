@@ -47,11 +47,12 @@ func TestCredentialRefreshMatchesOriginalJSONAndAccountIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	replacement, err := db.UpsertAccount(ctx, "replacement-account", "replacement-buffer", nil, nil, nil, nil, updated, &status)
-	if err != nil || replacement.ID != acc.ID {
-		t.Fatal("failed to reproduce ID reuse")
+	if err != nil || replacement.ID == acc.ID {
+		t.Fatalf("replacement inherited the deleted ID: %+v, %v", replacement, err)
 	}
+	// A refresh built from the deleted account must not resurrect its row.
 	if applied, err := db.ApplyCredentialRefresh(ctx, current, "stale-buffer", updated, "alive"); err != nil || applied {
-		t.Fatalf("old account refresh overwrote reused ID: %v, %v", applied, err)
+		t.Fatalf("deleted account refresh was applied: %v, %v", applied, err)
 	}
 }
 

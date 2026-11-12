@@ -107,7 +107,7 @@ func FetchBuffer(ctx context.Context, client *http.Client, creds Credentials) (s
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", errors.New("QQBrowser buffer transport failed")
+		return "", fmt.Errorf("QQBrowser buffer transport failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {

@@ -80,8 +80,13 @@ type accountProxyLease struct {
 }
 
 const (
-	proxyProbeInterval = 15 * time.Second
-	proxyProbeTimeout  = 3 * time.Second
+	proxyProbeInterval      = 15 * time.Second
+	proxyProbeTimeout       = 3 * time.Second
+	proxyTargetProbeTimeout = 5 * time.Second
+	// A failed proxy is replaced at most once per cooldown. Without this a
+	// script that retries a broken account would extract a new exit on every
+	// request and burn the provider's quota.
+	proxyFailoverCooldown = 30 * time.Second
 )
 
 func (body accountProxyIn) spec() proxysource.Spec {
@@ -447,7 +452,18 @@ func (a *App) resolveAccountProxy(ctx context.Context, accountID int64) (string,
 		a.proxyMu.Unlock()
 	}
 
+	profileID := int64(0)
+	if setting.ProviderProfileID != nil {
+		profileID = *setting.ProviderProfileID
+	}
+	started := time.Now()
 	proxyValue, err := a.resolveProxySpec(ctx, spec)
+	elapsed := time.Since(started).Round(time.Millisecond)
+	if err != nil {
+		log.Printf("[proxy] account %d profile %d extraction failed in %s: %v", accountID, profileID, elapsed, err)
+	} else if proxyValue != "" {
+		log.Printf("[proxy] account %d profile %d extracted %s in %s", accountID, profileID, proxysource.Mask(proxyValue), elapsed)
+	}
 	a.proxyMu.Lock()
 	defer a.proxyMu.Unlock()
 	if err == nil && proxyValue != "" {
@@ -477,6 +493,27 @@ func (a *App) invalidateProxyLease(accountID int64) {
 	a.proxyMu.Lock()
 	delete(a.proxyLeases, accountID)
 	a.proxyMu.Unlock()
+}
+
+// beginProxyFailover reports whether a proxy may be replaced now. It also
+// records the attempt so repeated failures cannot extract a new exit on every
+// request.
+func (a *App) beginProxyFailover(accountID int64) bool {
+	a.proxyFailoverMu.Lock()
+	defer a.proxyFailoverMu.Unlock()
+	now := time.Now()
+	if last, ok := a.proxyFailoverAt[accountID]; ok && now.Sub(last) < proxyFailoverCooldown {
+		return false
+	}
+	if len(a.proxyFailoverAt) >= 4096 {
+		for id, at := range a.proxyFailoverAt {
+			if now.Sub(at) >= proxyFailoverCooldown {
+				delete(a.proxyFailoverAt, id)
+			}
+		}
+	}
+	a.proxyFailoverAt[accountID] = now
+	return true
 }
 
 func (a *App) qrClientForSpec(ctx context.Context, spec proxysource.Spec) (*qr.Client, string, error) {

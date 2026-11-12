@@ -153,6 +153,8 @@ type App struct {
 	proxyLeases       map[int64]accountProxyLease
 	proxyLeaseLocksMu sync.Mutex
 	proxyLeaseLocks   map[int64]chan struct{}
+	proxyFailoverMu   sync.Mutex
+	proxyFailoverAt   map[int64]time.Time
 	keepAliveRetryMu  sync.Mutex
 	keepAliveRetryAt  map[int64]time.Time
 	panelSyncMu       sync.Mutex
@@ -299,6 +301,7 @@ func NewApp(cfg Config) (*App, error) {
 		refreshLocks:       map[int64]chan struct{}{},
 		proxyLeases:        map[int64]accountProxyLease{},
 		proxyLeaseLocks:    map[int64]chan struct{}{},
+		proxyFailoverAt:    map[int64]time.Time{},
 		keepAliveRetryAt:   map[int64]time.Time{},
 	}
 	// tuning.json changes the login budget and the fresh-session guard of the
@@ -1458,7 +1461,7 @@ func (a *App) ensureScannedAccountAllowed(r *http.Request, openID string) error 
 	if ownerErr != nil && errors.Is(ownerErr, sql.ErrNoRows) {
 		return errors.New("该账号已存在但尚未分配给普通用户，请联系管理员")
 	}
-	return errors.New("该 YYB 账号已属于其他用户")
+	return fmt.Errorf("该 YYB 账号已属于其他用户（ref=%d，归属用户 %s）", existing.ID, a.ownerLabel(r.Context(), owner))
 }
 
 func (a *App) resyncAll(w http.ResponseWriter, r *http.Request) {
@@ -1771,7 +1774,71 @@ func (a *App) fetchAccountLoginBuffer(ctx context.Context, acc *store.WechatAcco
 		return "", err
 	}
 	creds := protocol.CredentialsFromMap(acc.Credentials)
-	return a.fetchLoginBufferWithProxy(ctx, creds, proxyValue, fallbackDirect)
+	buffer, err := a.fetchLoginBufferWithProxy(ctx, creds, proxyValue, fallbackDirect)
+	if err == nil || proxyValue == "" || !protocol.IsProxyFailure(err) {
+		return buffer, err
+	}
+	log.Printf("[proxy] account %d login buffer fetch failed via %s: %v", acc.ID, proxysource.Mask(proxyValue), err)
+	// The cached exit refused the tunnel (for example 645 Proxy Authentication
+	// In Black List). A dynamic provider may hand out a working exit, but it
+	// can also hand out another endpoint that rejects the same source. Probe
+	// each replacement against the real target before spending a ticket
+	// request on it. The per-account cooldown keeps a broken provider from
+	// being extracted on every script retry.
+	if !a.beginProxyFailover(acc.ID) {
+		return "", err
+	}
+	const maxProxyFailovers = 2
+	lastErr := err
+	lastProxy := proxyValue
+	for attempt := 1; attempt <= maxProxyFailovers; attempt++ {
+		a.invalidateProxyLease(acc.ID)
+		nextProxy, nextFallback, resolveErr := a.resolveAccountProxy(ctx, acc.ID)
+		if resolveErr != nil {
+			return "", errors.Join(lastErr, fmt.Errorf("proxy failover attempt %d: %w", attempt, resolveErr))
+		}
+		if nextProxy == "" || nextProxy == lastProxy {
+			return "", lastErr
+		}
+		lastProxy = nextProxy
+		host, port := proxyProbeTarget(creds.Provider)
+		probeCtx, cancel := context.WithTimeout(ctx, proxyTargetProbeTimeout)
+		probeErr := protocol.ProbeProxyTarget(probeCtx, nextProxy, host, port, proxyTargetProbeTimeout)
+		cancel()
+		if probeErr != nil {
+			log.Printf("[proxy] account %d failover attempt %d exit %s unusable for %s:%d: %v",
+				acc.ID, attempt, proxysource.Mask(nextProxy), host, port, probeErr)
+			lastErr = errors.Join(lastErr, fmt.Errorf("proxy failover attempt %d probe: %w", attempt, probeErr))
+			continue
+		}
+		log.Printf("[proxy] account %d failover attempt %d exit %s passed target probe; retrying login buffer",
+			acc.ID, attempt, proxysource.Mask(nextProxy))
+		buffer, retryErr := a.fetchLoginBufferWithProxy(ctx, creds, nextProxy, nextFallback)
+		if retryErr == nil {
+			return buffer, nil
+		}
+		log.Printf("[proxy] account %d failover attempt %d retry failed via %s: %v",
+			acc.ID, attempt, proxysource.Mask(nextProxy), retryErr)
+		lastErr = errors.Join(lastErr, fmt.Errorf("proxy failover attempt %d retry: %w", attempt, retryErr))
+		if !protocol.IsProxyFailure(retryErr) {
+			return "", lastErr
+		}
+	}
+	return "", lastErr
+}
+
+// proxyProbeTarget names the host the channel actually needs to reach, so a
+// replacement exit is not accepted just because it can reach an unrelated
+// endpoint.
+func proxyProbeTarget(provider string) (string, int) {
+	switch provider {
+	case "pcmgr":
+		return "conna.gj.qq.com", 80
+	case "qbbrowser":
+		return "pbprxpc.qq.com", 443
+	default:
+		return "yybadaccess.3g.qq.com", 443
+	}
 }
 
 func (a *App) fetchLoginBufferWithProxy(ctx context.Context, creds protocol.LoginBufferCredentials, proxyValue string, fallbackDirect bool) (string, error) {

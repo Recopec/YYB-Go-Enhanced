@@ -711,3 +711,17 @@ func TestParseIPIPOutput(t *testing.T) {
 		t.Fatalf("unexpected json probe result: %+v", probeJSON)
 	}
 }
+
+func TestProxyFailoverCooldown(t *testing.T) {
+	app := &App{proxyFailoverAt: map[int64]time.Time{}}
+	if !app.beginProxyFailover(1) {
+		t.Fatal("first proxy failover was refused")
+	}
+	if app.beginProxyFailover(1) {
+		t.Fatal("proxy failover was not throttled")
+	}
+	app.proxyFailoverAt[1] = time.Now().Add(-proxyFailoverCooldown - time.Second)
+	if !app.beginProxyFailover(1) {
+		t.Fatal("expired proxy failover cooldown was not released")
+	}
+}

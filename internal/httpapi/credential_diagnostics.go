@@ -51,6 +51,8 @@ func credentialDiagnostics(err error) []upstreamDiagnostic {
 			item.Stage, item.UpstreamCode, message = "login_buffer", int64(e.Code), e.Message
 		case *protocol.ManualAuthRejectedError:
 			item.Stage, item.UpstreamCode = "manual_auth", e.Code
+		case *protocol.ProxyConnectError:
+			item.Stage, item.UpstreamCode = "proxy_connect", int64(e.Code)
 		case *protocol.LoginCodeRejectedError:
 			if e.Stage == "jslogin_business" || e.Stage == "jslogin_result" {
 				item.Stage, item.UpstreamCode = e.Stage, int64(e.Code)
